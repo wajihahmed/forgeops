@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Port-forward AM and IDM to localhost for browser access.
+# Requires prod.iam.example.com → 127.0.0.1 in /etc/hosts.
+# Usage: bin/tunnel [stop]
+
+set -euo pipefail
+
+PF_LOG_AM="/tmp/pf-am-80.log"
+PF_LOG_IDM="/tmp/pf-idm-8080.log"
+
+stop_tunnels() {
+  echo "Stopping tunnels..."
+  sudo kill $(lsof -ti tcp:443) 2>/dev/null || true
+  kill $(lsof -ti tcp:8080) 2>/dev/null || true
+  echo "Done."
+  exit 0
+}
+
+[ "${1:-}" = "stop" ] && stop_tunnels
+
+echo "Waiting for AM pod to be ready..."
+kubectl rollout status deployment/am -n fr-platform --timeout=300s >/dev/null
+
+AM_POD=$(kubectl get pod -n fr-platform -l app=am -o jsonpath='{.items[0].metadata.name}')
+IDM_POD=$(kubectl get pod -n fr-platform -l app=idm -o jsonpath='{.items[0].metadata.name}')
+
+echo "Starting nginx port-forward on port 443 (requires sudo)..."
+NGINX_POD=$(kubectl get pod -n ingress-nginx -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')
+sudo kubectl port-forward -n ingress-nginx pod/$NGINX_POD 443:443 > "$PF_LOG_AM" 2>&1 &
+
+echo "Starting IDM port-forward on port 8080..."
+kubectl port-forward -n fr-platform pod/$IDM_POD 8080:8080 > "$PF_LOG_IDM" 2>&1 &
+
+sleep 3
+
+echo ""
+echo "Tunnels active:"
+echo "  AM:  https://prod.iam.example.com/am  (self-signed cert — accept browser warning)"
+echo "  IDM: https://prod.iam.example.com/openidm"
+echo ""
+grep "prod.iam.example.com" /etc/hosts | head -1 | sed 's/^/  \/etc\/hosts: /'
+echo ""
+echo "Run 'bin/tunnel stop' to tear down."

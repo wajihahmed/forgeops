@@ -73,16 +73,25 @@ spec:
             name: idm-init-scripts
             defaultMode: 0755
       initContainers:
-        - name: custom-vol-init
-          image: idm-custom
+        - name: load-config-clone
+          image: config-loader
           imagePullPolicy: IfNotPresent
+          env:
+            - name: GIT_URL
+              value: "http://gitea.fr-platform.svc.cluster.local:3000/forgerock/customer-config.git"
+            - name: GIT_PATH
+              value: "/tmp/customer-config"
+            - name: CONFIG_SRC_PATH
+              value: "idm"
+            - name: DESTINATION_PATH
+              value: "/custom/config"
+            - name: CONFIG_LOAD_STRATEGY
+              value: "JSON_REPLACE"
+            - name: BRANCH
+              value: "master"
           volumeMounts:
             - mountPath: /custom
               name: custom
-            - mountPath: /scripts
-              name: idm-init-scripts
-          command:
-            - /scripts/custom-vol-init.sh
         - name: filesystem-init
           image: idm
           imagePullPolicy: IfNotPresent

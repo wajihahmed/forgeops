@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gitea-seed
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-gitea
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              until wget -qO- http://gitea:3000/ > /dev/null 2>&1; do
+                echo "Waiting for Gitea..."; sleep 5
+              done
+              echo "Gitea is up"
+      containers:
+        - name: seed
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              apk add --no-cache git curl > /dev/null 2>&1
+              sh /scripts/seed.sh
+          env:
+            - name: GITEA_URL
+              value: "http://gitea:3000"
+            - name: GITEA_USER
+              value: "forgerock"
+            - name: GITEA_PASSWORD
+              value: "forgerock"
+            - name: REPO_NAME
+              value: "customer-config"
+          volumeMounts:
+            - name: seed-scripts
+              mountPath: /scripts
+      volumes:
+        - name: seed-scripts
+          configMap:
+            name: gitea-seed-scripts
+            defaultMode: 0755

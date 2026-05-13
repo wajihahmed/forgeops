@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker build *)",
+      "Bash(docker images *)",
+      "Bash(kubectl apply *)",
+      "Bash(kubectl create *)",
+      "Bash(kubectl config *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl rollout *)",
+      "Bash(kubectl wait *)",
+      "Bash(kubectl logs *)",
+      "Bash(kubectl port-forward *)",
+      "Bash(kubectl delete *)",
+      "Bash(bin/forgeops *)",
+      "Bash(grep *)",
+      "Bash(sed *)",
+      "Bash(curl *)",
+      "Bash(kill *)"
+    ]
+  }
+}

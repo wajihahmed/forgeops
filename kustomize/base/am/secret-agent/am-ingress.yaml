@@ -25,12 +25,14 @@ metadata:
     nginx.ingress.kubernetes.io/session-cookie-hash: sha1
     nginx.ingress.kubernetes.io/session-cookie-name: route
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-redirect-from: "~^https?://am(:[0-9]+)?(/.*)?$ "
+    nginx.ingress.kubernetes.io/proxy-redirect-to: "https://prod.iam.example.com$2"
 spec:
   ingressClassName: nginx
   tls:
     - hosts:
         - "identity-platform.domain.local"
-      secretName: "tls-identity-platform.domain.local"
+      secretName: "platform-tls"
   rules:
     - host: "identity-platform.domain.local"
       http:

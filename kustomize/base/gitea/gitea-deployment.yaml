@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: init-dirs
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /data/git/.ssh /data/gitea/conf /data/gitea/repositories
+              chown -R 1000:1000 /data/git /data/gitea
+              chmod 700 /data/git/.ssh
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: gitea-data
+              mountPath: /data
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.22
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: GITEA__server__ROOT_URL
+              value: "http://gitea.fr-platform.svc.cluster.local:3000"
+            - name: GITEA__server__HTTP_PORT
+              value: "3000"
+            - name: GITEA__database__DB_TYPE
+              value: sqlite3
+            - name: GITEA__database__PATH
+              value: /data/gitea/gitea.db
+            - name: GITEA__security__INSTALL_LOCK
+              value: "true"
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    sleep 5
+                    gitea admin user create \
+                      --username forgerock \
+                      --password forgerock \
+                      --email forgerock@localhost \
+                      --admin \
+                      --must-change-password=false 2>/dev/null || true
+          volumeMounts:
+            - name: gitea-data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: gitea-data
+          persistentVolumeClaim:
+            claimName: gitea-data

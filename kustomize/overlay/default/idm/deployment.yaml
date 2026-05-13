@@ -11,7 +11,7 @@ spec:
       - name: openidm
         resources: {}
       initContainers:
-      - name: custom-vol-init
+      - name: load-config-clone
         resources: {}
       - name: filesystem-init
         resources: {}

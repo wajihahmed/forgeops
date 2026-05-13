@@ -13,3 +13,5 @@ resources:
   - ./admin-ui
   - ./end-user-ui
   - ./login-ui
+  - ./gitea
+  - ./gitea-seed

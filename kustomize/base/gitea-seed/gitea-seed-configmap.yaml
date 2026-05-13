@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-seed-scripts
+data:
+  seed.sh: |
+    #!/bin/sh
+    set -e
+
+    # Check if repo already exists — skip seeding if so
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+      -u "$GITEA_USER:$GITEA_PASSWORD" \
+      "$GITEA_URL/api/v1/repos/$GITEA_USER/$REPO_NAME")
+    if [ "$STATUS" = "200" ]; then
+      echo "Repo $REPO_NAME already exists, skipping seed"
+      exit 0
+    fi
+
+    echo "Creating repo $REPO_NAME in Gitea"
+    curl -s -f --max-time 10 -u "$GITEA_USER:$GITEA_PASSWORD" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"'"$REPO_NAME"'","private":false,"auto_init":false}' \
+      "$GITEA_URL/api/v1/user/repos"
+
+    WORK_DIR=$(mktemp -d)
+    cd "$WORK_DIR"
+    git init
+    git config user.email "seed@localhost"
+    git config user.name "Seed Job"
+
+    # AM stub — filesystem-init overlays on top of the image's baked config.
+    mkdir -p am
+    touch am/.gitkeep
+
+    # IDM stub — filesystem-init copies /opt/openidm/conf,ui,script from image,
+    # then overlays /custom/config on top.
+    mkdir -p idm
+    touch idm/.gitkeep
+
+    git add .
+    git commit -m "Initial customer-config scaffold"
+    git remote add origin \
+      "http://$GITEA_USER:$GITEA_PASSWORD@gitea:3000/$GITEA_USER/$REPO_NAME.git"
+    git push -u origin master
+    echo "Seeding complete"

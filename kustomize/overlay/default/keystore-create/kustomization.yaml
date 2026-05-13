@@ -21,3 +21,9 @@ patches:
     version: 'v1'
     kind: RoleBinding
     name: keystore-create
+- path: keystore-type-patch.yaml
+  target:
+    group: batch
+    version: v1
+    kind: Job
+    name: keystore-create

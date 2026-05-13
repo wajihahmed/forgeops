@@ -30,7 +30,7 @@ spec:
   tls:
     - hosts:
         - "identity-platform.domain.local"
-      secretName: "tls-identity-platform.domain.local"
+      secretName: "platform-tls"
   rules:
     - host: "identity-platform.domain.local"
       http:

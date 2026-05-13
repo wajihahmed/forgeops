@@ -1,3 +1,6 @@
 - op: replace
   path: /roleRef/name
   value: keystore-create:prod
+- op: replace
+  path: /subjects/0/namespace
+  value: fr-platform

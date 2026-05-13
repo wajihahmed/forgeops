@@ -86,6 +86,10 @@ variable "GIT_SERVER_FROM_IMAGE" {
   default = null
 }
 
+variable "CONFIG_LOADER_FROM_IMAGE" {
+  default = null
+}
+
 variable "ADMIN_UI_FROM_IMAGE" {
   default = null
 }
@@ -142,6 +146,7 @@ group "base-extra" {
     "ds-proxy",
     "rcs-agent",
     "git-server",
+    "config-loader",
   ]
 }
 
@@ -304,6 +309,20 @@ target "git-server" {
   tags = "${tags("${REGISTRY}", "${REPOSITORY}", "git-server", "${BUILD_TAG}")}"
   cache-to = ["mode=max,type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/git-server:build-cache"]
   cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/git-server:build-cache"]
+}
+
+target "config-loader" {
+  inherits = ["base"]
+
+  context = "./config-loader"
+  dockerfile = "Dockerfile"
+  args = {
+    FROM_IMAGE = CONFIG_LOADER_FROM_IMAGE
+  }
+
+  tags = "${tags("${REGISTRY}", "${REPOSITORY}", "config-loader", "${BUILD_TAG}")}"
+  cache-to = ["mode=max,type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/config-loader:build-cache"]
+  cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/config-loader:build-cache"]
 }
 
 target "admin-ui" {
