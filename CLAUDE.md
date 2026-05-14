@@ -203,8 +203,8 @@ The base `keystore-create` Job uses the AM image, which has no `jq`. Two overlay
 
 ```
 load-config-clone (config-loader image)
-  → git clone gitea/customer-config → /tmp/customer-config
-  → copy /tmp/customer-config/am|idm → /custom/config
+  AM:  git clone gitea/customer-config/am  → /custom/config/services
+  IDM: git clone gitea/customer-config/idm → /custom/config
   → prints "config-loader done" on success
 
 filesystem-init (am|idm image, unchanged)
@@ -218,6 +218,56 @@ Main container
   → reads config from /fbc (AM) or /fbc/conf,/fbc/ui,/fbc/script (IDM)
   → CATALINA_USER_OPTS passes -Dam.server.fqdn=prod.iam.example.com to JVM (AM only)
 ```
+
+## customer-config Repo Structure and Path Mapping
+
+The `forgerock/customer-config` Gitea repo layout maps to pod paths as follows:
+
+```
+Repo path                          →  Pod path (AM)
+am/                                →  /home/forgerock/openam/config/services/
+am/realm/root/...                  →  /home/forgerock/openam/config/services/realm/root/...
+
+Repo path                          →  Pod path (IDM)
+idm/                               →  /home/forgerock/openam/config/  (IDM uses JSON_REPLACE)
+```
+
+The translation chain for AM:
+```
+Gitea: am/         (DESTINATION_PATH = /custom/config/services)
+         ↓ load-config-clone copies to
+       /custom/config/services/
+         ↓ filesystem-init copies /custom/config → /fbc/config
+       /fbc/config/services/
+         ↓ fbc volume mounted at /home/forgerock/openam
+       /home/forgerock/openam/config/services/
+```
+
+### Updating config from a running AM pod
+
+To export live config from a pod and push it to Gitea:
+
+```sh
+# 1. Start Gitea port-forward (separate terminal, keep running)
+kubectl port-forward -n fr-platform svc/gitea 3000:3000
+
+# 2. Copy services config out of the pod
+AM_POD=$(kubectl get pod -n fr-platform -l app=am -o jsonpath='{.items[0].metadata.name}')
+kubectl cp -n fr-platform ${AM_POD}:/home/forgerock/openam/config/services /tmp/am-services
+
+# 3. Clone the repo, place files at the correct level, push
+git clone http://forgerock:forgerock@localhost:3000/forgerock/customer-config /tmp/customer-config-repo
+cp -r /tmp/am-services/. /tmp/customer-config-repo/am/
+cd /tmp/customer-config-repo
+git add .
+git commit -m "Export AM config from pod"
+git push
+
+# 4. Restart AM to pick up the new config
+kubectl rollout restart deployment/am -n fr-platform
+```
+
+Note: `am/` in the repo maps directly to `config/services/` in the pod — do **not** add a `config/` subdirectory in the repo.
 
 ---
 
