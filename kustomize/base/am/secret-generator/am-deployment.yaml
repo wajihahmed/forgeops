@@ -96,7 +96,7 @@ spec:
             - name: CONFIG_SRC_PATH
               value: "am"
             - name: DESTINATION_PATH
-              value: "/custom/config"
+              value: "/custom/config/services"
             - name: CONFIG_LOAD_STRATEGY
               value: "JSON_MERGE"
             - name: BRANCH
