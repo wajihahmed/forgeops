@@ -418,6 +418,12 @@ URLs:
 
 The cert is self-signed — accept the browser warning.
 
+### Why port-forwarding is still needed on OrbStack
+
+Although nginx runs with `hostNetwork=true` and binds to ports 80/443 on the OrbStack node IP (`192.168.139.2`), that IP is **not directly reachable** from the Mac. CrowdStrike and other corporate security tooling block direct access to the OrbStack VM network — the same reason Colima's bridged networking was abandoned.
+
+The port-forward works because it tunnels over OrbStack's stable loopback (`127.0.0.1`) rather than routing through the VM network, which is unaffected by the security tooling. The key advantage over Colima is that OrbStack's port-forward never flaps — Colima went over an SSH tunnel that dropped intermittently.
+
 ---
 
 ## Key File Locations
