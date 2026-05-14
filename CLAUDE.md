@@ -362,8 +362,8 @@ kustomize/base/am/secret-generator/am-deployment.yaml             — load-confi
 kustomize/base/am/secret-agent/am-deployment.yaml                 — load-config-clone init container
 kustomize/base/am/secret-generator/am-service.yaml                — targetPort: http (was https)
 kustomize/base/am/secret-agent/am-service.yaml                    — targetPort: http (was https)
-kustomize/base/am/secret-generator/am-ingress.yaml                — nginx, TLS, proxy-redirect annotations
-kustomize/base/am/secret-agent/am-ingress.yaml                    — nginx, TLS, proxy-redirect annotations
+kustomize/base/am/secret-generator/am-ingress.yaml                — nginx, TLS
+kustomize/base/am/secret-agent/am-ingress.yaml                    — nginx, TLS
 kustomize/base/idm/secret-generator/idm-deployment.yaml           — load-config-clone init container
 kustomize/base/idm/secret-agent/idm-deployment.yaml               — load-config-clone init container
 kustomize/base/idm/secret-generator/idm-ingress.yaml              — nginx, TLS
@@ -404,7 +404,7 @@ The command covers all 11 steps: prerequisites (cert-manager + nginx + mittwald)
 ## Known Issues / Gotchas
 
 - **`AM_SERVER_FQDN` alone is not enough** — must also be in `CATALINA_USER_OPTS` as `-Dam.server.fqdn=...` for AM to use it as a JVM property. The env var is consumed by the shell entrypoint but the JVM only reads system properties.
-- **nginx v1.15 rejects `$2` capture groups** in `proxy-redirect-from`/`proxy-redirect-to` annotations — validation error is logged but annotations are otherwise harmless. The AM redirect issue is solved by the JVM properties fix above, not by these annotations.
+- **`proxy-redirect-from`/`proxy-redirect-to` annotations are not used** — these were an earlier attempt at a workaround and have been removed. The AM redirect issue is fully solved by the `CATALINA_USER_OPTS` JVM properties fix.
 - **DS admin password is permanent** — if DS starts before the mittwald operator populates `ds-passwords`, the password will be blank and cannot be changed. Must wipe PVCs and redeploy.
 - **Gitea `DEFAULT_ADMIN_*` env vars don't work** in gitea:1.22 without running the install wizard. Admin user is created via `lifecycle.postStart` hook instead.
 - **keystore-create needs internet** — downloads a static `jq` binary from GitHub releases at runtime.
