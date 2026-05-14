@@ -333,6 +333,24 @@ kill %1 2>/dev/null
 
 ---
 
+## Accessing the Gitea Git Server
+
+Gitea is an in-cluster service only (no ingress). Access it via port-forward:
+
+```sh
+kubectl port-forward -n fr-platform svc/gitea 3000:3000
+```
+
+Keep that command running, then open **http://localhost:3000** in a browser.
+
+- **Username:** `forgerock`
+- **Password:** `forgerock`
+- **Repo:** `http://localhost:3000/forgerock/customer-config`
+
+The port-forward must stay in the foreground — Ctrl+C closes the connection.
+
+---
+
 ## Browser Access
 
 `bin/tunnel` port-forwards the nginx ingress controller's port 443 to `sudo` localhost:443:
