@@ -45,4 +45,4 @@ pyenv.cfg
 *.swp
 *.swo
 *~
-lib/dependencies
+lib/dependenciesfbc/
