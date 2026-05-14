@@ -6,7 +6,9 @@ A branch of ForgeOps that adds **File Based Configuration (FBC)** — meaning AM
 
 The `bin/forgeops` CLI (already in this repo) is the deployment tool. No standalone Python script is needed. The branch modifies the kustomize manifests and adds a `config-loader` component; `forgeops apply` and `forgeops build` continue to work as the user-facing interface.
 
-The target is a `fr-platform` namespace on a **local Kubernetes cluster** (Colima). Config loading is **read-only** at pod startup — no config-saver / round-trip back to git needed.
+The target is a `fr-platform` namespace on a **local Kubernetes cluster** (OrbStack). Config loading is **read-only** at pod startup — no config-saver / round-trip back to git needed.
+
+All work lives on branch **`wajih-fbc-local`**.
 
 ---
 
@@ -19,6 +21,18 @@ This work originated from an investigation of the `ForgeCloud/saas` monorepo (at
 - Already uses Kustomize, same products (AM, IDM, DS), same image base
 - Already has an FBC init-container hook point (see below)
 - Full investigation notes live in `/Users/wajih.ahmed/source/github.com/ForgeCloud/saas/CLAUDE.md`
+
+---
+
+## Kubernetes Runtime: OrbStack
+
+**OrbStack** is used instead of Colima. OrbStack provides a stable Kubernetes API on `127.0.0.1:26443` with no SSH tunnel, no socket_vmnet complications, and no corporate network interference.
+
+- Start OrbStack from the macOS menu bar or `open -a OrbStack`
+- Kubernetes context name: `orbstack`
+- Switch to it: `kubectl config use-context orbstack`
+
+Colima was investigated earlier but abandoned due to SSH tunnel instability and socket_vmnet entitlement issues on a corporate laptop. Do not attempt to use Colima for this project.
 
 ---
 
@@ -99,21 +113,86 @@ Replaced `custom-vol-init` with `load-config-clone` in all four base deployment 
 
 Overlay deployment patches (`kustomize/overlay/default/am/deployment.yaml` and `idm/deployment.yaml`) reference `load-config-clone` (not the old `custom-vol-init` name).
 
+### AM service fix (critical)
+
+The base AM service had `targetPort: https` (port 8081, AM's HTTPS port). Changed to `targetPort: http` (port 8080, AM's HTTP port) in both:
+- `kustomize/base/am/secret-generator/am-service.yaml`
+- `kustomize/base/am/secret-agent/am-service.yaml`
+
+Without this fix, nginx routes all traffic to AM's HTTPS port and gets TLS handshake errors.
+
+### AM server URL fix (critical)
+
+AM stores its own server URL (`am.server.fqdn`) in config on first bootstrap. Without correct JVM properties, it defaults to the Kubernetes service name `am` and issues redirects to `https://am/am/XUI/` which the browser cannot reach.
+
+Two changes were made to fix this:
+
+1. **`kustomize/overlay/default/base/platform-config.yaml`** — added `AM_SERVER_FQDN: "prod.iam.example.com"` (was missing from the overlay; base had `identity-platform.domain.local`)
+
+2. **`kustomize/overlay/default/am/deployment.yaml`** — added `CATALINA_USER_OPTS` env var to the `openam` container:
+   ```yaml
+   env:
+   - name: CATALINA_USER_OPTS
+     value: "-Dam.server.protocol=https -Dam.server.fqdn=prod.iam.example.com -Dam.server.port=443"
+   ```
+   This passes the correct values as JVM system properties. The `AM_SERVER_FQDN` env var alone is NOT sufficient — it must also be passed to the JVM via `CATALINA_USER_OPTS`.
+
+### AM and IDM ingress
+
+Both AM and IDM ingresses have:
+- `ingressClassName: nginx`
+- TLS enabled with `secretName: platform-tls`
+- FQDN patched to `prod.iam.example.com` via `ingress-fqdn.yaml` JSON patches
+
+Files:
+- `kustomize/base/am/secret-agent/am-ingress.yaml`
+- `kustomize/base/am/secret-generator/am-ingress.yaml`
+- `kustomize/base/idm/secret-agent/idm-ingress.yaml`
+- `kustomize/base/idm/secret-generator/idm-ingress.yaml`
+- `kustomize/overlay/default/am/ingress-fqdn.yaml`
+- `kustomize/overlay/default/idm/ingress-fqdn.yaml`
+
+### TLS certificate
+
+A cert-manager `ClusterIssuer` (self-signed) and `Certificate` resource issue the `platform-tls` Secret used by both ingresses:
+- `kustomize/overlay/default/tls/certificate.yaml`
+- `kustomize/overlay/default/tls/kustomization.yaml`
+
+Must be applied before AM/IDM are deployed.
+
+### nginx ingress controller
+
+ForgeOps manifests use `ingressClassName: nginx` but do NOT ship the nginx ingress controller. It must be pre-installed as a cluster prerequisite:
+```sh
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  --set controller.hostNetwork=true \
+  --set controller.kind=DaemonSet \
+  --set controller.service.type=ClusterIP \
+  --wait
+```
+`hostNetwork=true` is required so nginx binds to the node's IP on ports 80/443 (no cloud load balancer on local k8s).
+
 ### Gitea in-cluster git server
 
 Single Gitea pod serves the `forgerock/customer-config` repo at `http://gitea.fr-platform.svc.cluster.local:3000`.
 
 Key implementation detail: Gitea's s6 init supervisor must start as root. The pod has **no** `runAsUser` set. An `init-dirs` init container (running as root) pre-creates `/data/git/.ssh` and `/data/gitea` with ownership `1000:1000` before Gitea starts.
 
+Admin user is created via a `lifecycle.postStart` hook running `gitea admin user create` — the `DEFAULT_ADMIN_*` env vars do NOT work in gitea:1.22.
+
 ### Gitea seed job
 
-A one-time Job (`gitea-seed`) uses the Gitea REST API (via `curl`) to create the admin user and `forgerock/customer-config` repo, then `git push` the initial AM and IDM config stubs.
+A one-time Job (`gitea-seed`) uses the Gitea REST API (via `curl`) to create the `forgerock/customer-config` repo, then `git push` the initial AM and IDM config stubs.
 
-Key implementation detail: uses `curl -u user:pass` not `wget` — Alpine BusyBox wget lacks `--user`/`--password`. Uses `alpine:3.19` image (not `alpine/git` which has git as its ENTRYPOINT and can't run a shell).
+Key implementation details:
+- Uses `curl -u user:pass` (not `wget` — Alpine BusyBox wget lacks `--user`/`--password`)
+- Uses `alpine:3.19` image (not `alpine/git` which has git as its ENTRYPOINT)
+- All curl calls use `--max-time 10` to prevent indefinite hangs
 
 ### keystore-create fixes
 
-The base `keystore-create` Job uses the AM image, which has no `jq` and a stripped-down non-writeable apt cache. Two overlay patches in `kustomize/overlay/default/keystore-create/`:
+The base `keystore-create` Job uses the AM image, which has no `jq`. Two overlay patches:
 
 - `keystore-type-patch.yaml` — overrides the initContainer command to download a static `jq` binary from GitHub releases before running the script; sets `KEYSTORE_TYPE=jceks` to skip the first `jq` call
 - `role-binding.yaml` — patches the RoleBinding `subjects[0].namespace` from the hardcoded `prod` to `fr-platform`
@@ -137,22 +216,36 @@ truststore-init (am|idm image, unchanged)
 
 Main container
   → reads config from /fbc (AM) or /fbc/conf,/fbc/ui,/fbc/script (IDM)
+  → CATALINA_USER_OPTS passes -Dam.server.fqdn=prod.iam.example.com to JVM (AM only)
 ```
 
 ---
 
 ## Prerequisites (Must Be Installed Before First Deploy)
 
-These are cluster-wide installs done once:
+These are cluster-wide installs done once on OrbStack:
 
 ### 1. cert-manager
-Required by DS for SSL certificate generation (even with `secret-generator` mode):
+Required by DS for SSL certificate generation and by the TLS overlay:
 ```sh
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
 kubectl rollout status deployment/cert-manager -n cert-manager --timeout=120s
 ```
 
-### 2. mittwald kubernetes-secret-generator
+### 2. nginx ingress controller
+ForgeOps uses `ingressClassName: nginx` but does not install the controller:
+```sh
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update ingress-nginx
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  --set controller.hostNetwork=true \
+  --set controller.kind=DaemonSet \
+  --set controller.service.type=ClusterIP \
+  --wait
+```
+
+### 3. mittwald kubernetes-secret-generator
 Watches Secret annotations and populates random values. **Must be running before DS is deployed** — DS reads the `ds-passwords` Secret during first-init to set its admin password. If this operator isn't running when DS first starts, the admin password will be empty and `ds-set-passwords` will permanently fail.
 ```sh
 helm repo add mittwald https://helm.mittwald.de
@@ -165,20 +258,13 @@ helm upgrade --install secret-generator mittwald/kubernetes-secret-generator \
 
 ## Overlay Changes for Local Dev (already committed)
 
-The default overlay uses `secret-agent`. For local Colima clusters (no Secret Agent operator), these were switched to `secret-generator`:
-
-- `kustomize/overlay/default/secrets/kustomization.yaml`
-- `kustomize/overlay/default/am/kustomization.yaml`
-- `kustomize/overlay/default/idm/kustomization.yaml`
-
----
-
-## Colima-Specific Notes
-
-- StorageClass patched from `fast` → `local-path` in `kustomize/overlay/default/ds-idrepo/sts.yaml` and `ds-cts/sts.yaml`
-- FQDN changed from `prod.iam.example.com` → `localhost` in `kustomize/overlay/default/base/platform-config.yaml`
-- No `kind load` needed — Colima's docker daemon is shared with Kubernetes
-- Full step-by-step manual instructions in `colima.md`
+- `kustomize/overlay/default/secrets/kustomization.yaml` — switched to `secret-generator` mode
+- `kustomize/overlay/default/am/kustomization.yaml` — switched to `secret-generator` mode
+- `kustomize/overlay/default/idm/kustomization.yaml` — switched to `secret-generator` mode
+- `kustomize/overlay/default/ds-idrepo/sts.yaml` — `storageClassName: local-path` (was `fast`)
+- `kustomize/overlay/default/ds-cts/sts.yaml` — `storageClassName: local-path` (was `fast`)
+- `kustomize/overlay/default/base/platform-config.yaml` — FQDN `prod.iam.example.com`, `AM_SERVER_FQDN: prod.iam.example.com`
+- `/etc/hosts` must have `127.0.0.1 prod.iam.example.com`
 
 ---
 
@@ -187,12 +273,17 @@ The default overlay uses `secret-agent`. For local Colima clusters (no Secret Ag
 Wrong order causes DS to initialize with an empty admin password, which cannot be recovered without wiping PVCs.
 
 **Correct order:**
-1. Install cert-manager and mittwald (cluster-wide, once)
-2. `bin/forgeops apply -e default -n fr-platform base ds-cts ds-idrepo`
-3. Wait for `ds-set-passwords` Job to complete
-4. `kubectl apply -k kustomize/overlay/default/keystore-create/`
-5. Wait for `keystore-create` Job to complete (downloads `jq` via curl — needs internet)
-6. `bin/forgeops apply -e default -n fr-platform am idm`
+1. Install cert-manager, nginx ingress, and mittwald (cluster-wide, once)
+2. Build config-loader image: `docker build -t config-loader:local docker/config-loader/`
+3. Create namespace: `kubectl create namespace fr-platform`
+4. Deploy Gitea: `kubectl apply -k kustomize/overlay/default/gitea/`
+5. Seed customer-config repo: `kubectl apply -k kustomize/overlay/default/gitea-seed/`
+6. Deploy DS and secrets: `bin/forgeops apply -e default -n fr-platform base ds-cts ds-idrepo`
+7. Wait for `ds-set-passwords` Job to complete
+8. Deploy keystore-create: `kubectl apply -k kustomize/overlay/default/keystore-create/`
+9. Wait for `keystore-create` Job to complete (downloads `jq` via curl — needs internet)
+10. Issue TLS cert: `kubectl apply -k kustomize/overlay/default/tls/`
+11. Deploy AM and IDM: `bin/forgeops apply -e default -n fr-platform am idm`
 
 **Recovery if DS initialized with empty secret:**
 ```sh
@@ -207,7 +298,7 @@ bin/forgeops apply -e default -n fr-platform base ds-cts ds-idrepo
 
 ## Health Check
 
-AM's service port 80 maps to the HTTPS container port (8081), not HTTP. To health-check via HTTP, port-forward directly to the pod's port 8080:
+AM is accessed via HTTPS through nginx. Direct HTTP health check via pod port-forward:
 
 ```sh
 AM_POD=$(kubectl get pod -n fr-platform -l app=am -o jsonpath='{.items[0].metadata.name}')
@@ -230,40 +321,91 @@ kill %1 2>/dev/null
 
 Must return `{"state":"ACTIVE_READY"}`.
 
+Via nginx (full HTTPS flow):
+```sh
+NGINX_POD=$(kubectl get pod -n ingress-nginx -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n ingress-nginx pod/$NGINX_POD 18443:443 > /tmp/pf-nginx.log 2>&1 &
+sleep 3
+curl -sk -D - "https://localhost:18443/am/XUI/" -H "Host: prod.iam.example.com" --max-redirs 0 | grep "HTTP/"
+kill %1 2>/dev/null
+# Expected: HTTP/2 200
+```
+
+---
+
+## Browser Access
+
+`bin/tunnel` port-forwards the nginx ingress controller's port 443 to `sudo` localhost:443:
+```sh
+bin/tunnel        # start
+bin/tunnel stop   # stop
+```
+
+Requires `/etc/hosts` to have `127.0.0.1 prod.iam.example.com`.
+Requires `sudo` (port 443 is privileged).
+
+URLs:
+- AM:  `https://prod.iam.example.com/am`
+- IDM: `https://prod.iam.example.com/openidm`
+
+The cert is self-signed — accept the browser warning.
+
 ---
 
 ## Key File Locations
 
 ```
-docker/config-loader/Dockerfile                              — config-loader image (Alpine + git + jq)
-docker/config-loader/clone-and-copy.sh                       — loader script
-docker/docker-bake.hcl                                       — added config-loader build target
-kustomize/base/am/secret-generator/am-deployment.yaml        — load-config-clone init container
-kustomize/base/am/secret-agent/am-deployment.yaml            — load-config-clone init container
-kustomize/base/idm/secret-generator/idm-deployment.yaml      — load-config-clone init container
-kustomize/base/idm/secret-agent/idm-deployment.yaml          — load-config-clone init container
-kustomize/base/gitea/                                        — Gitea Deployment, Service, PVC
-kustomize/base/gitea-seed/                                   — seed Job + ConfigMap
-kustomize/overlay/default/gitea/                             — overlay for Gitea
-kustomize/overlay/default/gitea-seed/                        — overlay for seed job
-kustomize/overlay/default/kustomization.yaml                 — includes gitea + gitea-seed
-kustomize/overlay/default/image-defaulter/kustomization.yaml — config-loader:local image mapping
+docker/config-loader/Dockerfile                                    — config-loader image (Alpine + git + jq)
+docker/config-loader/clone-and-copy.sh                             — loader script
+docker/docker-bake.hcl                                             — added config-loader build target
+kustomize/base/am/secret-generator/am-deployment.yaml             — load-config-clone init container
+kustomize/base/am/secret-agent/am-deployment.yaml                 — load-config-clone init container
+kustomize/base/am/secret-generator/am-service.yaml                — targetPort: http (was https)
+kustomize/base/am/secret-agent/am-service.yaml                    — targetPort: http (was https)
+kustomize/base/am/secret-generator/am-ingress.yaml                — nginx, TLS, proxy-redirect annotations
+kustomize/base/am/secret-agent/am-ingress.yaml                    — nginx, TLS, proxy-redirect annotations
+kustomize/base/idm/secret-generator/idm-deployment.yaml           — load-config-clone init container
+kustomize/base/idm/secret-agent/idm-deployment.yaml               — load-config-clone init container
+kustomize/base/idm/secret-generator/idm-ingress.yaml              — nginx, TLS
+kustomize/base/idm/secret-agent/idm-ingress.yaml                  — nginx, TLS
+kustomize/base/gitea/                                              — Gitea Deployment, Service, PVC
+kustomize/base/gitea-seed/                                         — seed Job + ConfigMap
+kustomize/overlay/default/gitea/                                   — overlay for Gitea
+kustomize/overlay/default/gitea-seed/                              — overlay for seed job
+kustomize/overlay/default/tls/certificate.yaml                     — ClusterIssuer + Certificate (platform-tls)
+kustomize/overlay/default/tls/kustomization.yaml                   — TLS overlay kustomization
+kustomize/overlay/default/kustomization.yaml                       — includes gitea + gitea-seed + tls
+kustomize/overlay/default/image-defaulter/kustomization.yaml       — config-loader:local image mapping
 kustomize/overlay/default/keystore-create/keystore-type-patch.yaml — jq download + KEYSTORE_TYPE fix
-kustomize/overlay/default/keystore-create/role-binding.yaml  — namespace patched to fr-platform
-kustomize/overlay/default/am/deployment.yaml                 — overlay patch uses load-config-clone
-kustomize/overlay/default/idm/deployment.yaml                — overlay patch uses load-config-clone
-kustomize/overlay/default/base/platform-config.yaml          — FQDN set to localhost
-kustomize/overlay/default/ds-idrepo/sts.yaml                 — storageClassName: local-path
-kustomize/overlay/default/ds-cts/sts.yaml                    — storageClassName: local-path
-colima.md                                                    — full manual deploy instructions
-.claude/commands/deploy-fbc.md                               — /deploy-fbc slash command
-.claude/settings.json                                        — allow rules for kubectl/docker/forgeops
+kustomize/overlay/default/keystore-create/role-binding.yaml        — namespace patched to fr-platform
+kustomize/overlay/default/am/deployment.yaml                       — CATALINA_USER_OPTS for am.server.fqdn
+kustomize/overlay/default/am/ingress-fqdn.yaml                     — host/TLS patched to prod.iam.example.com
+kustomize/overlay/default/idm/deployment.yaml                      — overlay patch uses load-config-clone
+kustomize/overlay/default/idm/ingress-fqdn.yaml                    — host/TLS patched to prod.iam.example.com
+kustomize/overlay/default/base/platform-config.yaml                — FQDN + AM_SERVER_FQDN = prod.iam.example.com
+kustomize/overlay/default/ds-idrepo/sts.yaml                       — storageClassName: local-path
+kustomize/overlay/default/ds-cts/sts.yaml                          — storageClassName: local-path
+bin/tunnel                                                          — port-forwards nginx 443 for browser access
+colima.md                                                           — Colima notes (superseded by OrbStack)
+.claude/commands/deploy-fbc.md                                      — /deploy-fbc slash command
+.claude/settings.json                                               — allow rules for kubectl/docker/forgeops
 ```
 
 ---
 
 ## Claude Code Slash Command
 
-`.claude/commands/deploy-fbc.md` defines a `/deploy-fbc` slash command that automates the full deploy sequence. Requires a Claude Code restart to appear after creation.
+`.claude/commands/deploy-fbc.md` defines a `/deploy-fbc` slash command that automates the full deploy sequence. Requires a Claude Code restart to appear.
 
-The command covers all 9 steps: prerequisites (cert-manager + mittwald), config-loader build, namespace, Gitea, seed, DS+secrets (with ds-set-passwords wait and recovery instructions), keystore-create, AM+IDM, and health checks for both AM and IDM.
+The command covers all 11 steps: prerequisites (cert-manager + nginx + mittwald), config-loader build, namespace, Gitea, seed, DS+secrets (with ds-set-passwords wait and recovery instructions), keystore-create, TLS cert, AM+IDM, and health checks.
+
+---
+
+## Known Issues / Gotchas
+
+- **`AM_SERVER_FQDN` alone is not enough** — must also be in `CATALINA_USER_OPTS` as `-Dam.server.fqdn=...` for AM to use it as a JVM property. The env var is consumed by the shell entrypoint but the JVM only reads system properties.
+- **nginx v1.15 rejects `$2` capture groups** in `proxy-redirect-from`/`proxy-redirect-to` annotations — validation error is logged but annotations are otherwise harmless. The AM redirect issue is solved by the JVM properties fix above, not by these annotations.
+- **DS admin password is permanent** — if DS starts before the mittwald operator populates `ds-passwords`, the password will be blank and cannot be changed. Must wipe PVCs and redeploy.
+- **Gitea `DEFAULT_ADMIN_*` env vars don't work** in gitea:1.22 without running the install wizard. Admin user is created via `lifecycle.postStart` hook instead.
+- **keystore-create needs internet** — downloads a static `jq` binary from GitHub releases at runtime.
+- **`bin/tunnel` requires sudo** — port 443 is privileged on macOS.
