@@ -1,6 +1,6 @@
 # /deploy-fbc
 
-Deploy the FBC (File Based Configuration) dev stack on Colima, step by step.
+Deploy the FBC (File Based Configuration) dev stack on OrbStack, step by step.
 
 Execute these steps in order. After each step, verify it succeeded before continuing.
 If a step fails, report the error and stop — do not continue to the next step.
@@ -8,7 +8,8 @@ If a step fails, report the error and stop — do not continue to the next step.
 ## Step 0 — Prerequisites
 
 **Kubernetes runtime: OrbStack** — OrbStack provides stable Kubernetes on `127.0.0.1:26443`
-with no SSH tunnel, no socket_vmnet, and no corporate network interference.
+with no SSH tunnel and no socket_vmnet issues. The OrbStack node IP is still blocked by
+CrowdStrike but the API and port-forwards run over loopback and are unaffected.
 Start OrbStack from the macOS menu bar or `open -a OrbStack`.
 
 1. Verify the OrbStack context is active:
@@ -28,11 +29,14 @@ Start OrbStack from the macOS menu bar or `open -a OrbStack`.
      kustomize/overlay/default/ds-cts/sts.yaml
    ```
 
-3. Verify FQDN is set to `prod.iam.example.com` in `kustomize/overlay/default/base/platform-config.yaml`:
+3. Verify FQDN and AM_SERVER_FQDN are set to `prod.iam.example.com` in `kustomize/overlay/default/base/platform-config.yaml`:
    ```
-   grep FQDN kustomize/overlay/default/base/platform-config.yaml
+   grep -E "FQDN|AM_SERVER_FQDN" kustomize/overlay/default/base/platform-config.yaml
    ```
-   It must show `FQDN: "prod.iam.example.com"`. If not, update it.
+   Must show both `FQDN: "prod.iam.example.com"` and `AM_SERVER_FQDN: "prod.iam.example.com"`.
+   If either is missing or wrong, update the file. Both are required — `AM_SERVER_FQDN` alone is
+   not enough; it must also be passed as a JVM property via `CATALINA_USER_OPTS` in
+   `kustomize/overlay/default/am/deployment.yaml`.
 
 4. Verify `/etc/hosts` has `127.0.0.1` mapped to `prod.iam.example.com`:
    ```
@@ -257,7 +261,8 @@ bin/tunnel
 ```
 
 This forwards the nginx ingress controller port 443 → `sudo` localhost:443 (requires sudo for privileged port).
-`/etc/hosts` must have `127.0.0.1 prod.iam.example.com`.
+Note: even with `hostNetwork=true`, the OrbStack node IP is blocked by CrowdStrike — the port-forward
+over loopback is required and works reliably.
 
 URLs:
 - AM:  `https://prod.iam.example.com/am`  (self-signed cert — accept browser warning)
