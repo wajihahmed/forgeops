@@ -26,7 +26,7 @@ This work originated from an investigation of the `ForgeCloud/saas` monorepo (at
 
 ## Kubernetes Runtime: OrbStack
 
-**OrbStack** is used instead of Colima. OrbStack provides a stable Kubernetes API on `127.0.0.1:26443` with no SSH tunnel, no socket_vmnet complications, and no corporate network interference.
+**OrbStack** is used instead of Colima. OrbStack provides a stable Kubernetes API on `127.0.0.1:26443` with no SSH tunnel and no socket_vmnet complications. The OrbStack node IP (`192.168.139.2`) is still blocked by CrowdStrike, but the Kubernetes API and `kubectl port-forward` both run over loopback (`127.0.0.1`) which is unaffected.
 
 - Start OrbStack from the macOS menu bar or `open -a OrbStack`
 - Kubernetes context name: `orbstack`
