@@ -90,6 +90,10 @@ variable "CONFIG_LOADER_FROM_IMAGE" {
   default = null
 }
 
+variable "ESV_SHIM_FROM_IMAGE" {
+  default = null
+}
+
 variable "ADMIN_UI_FROM_IMAGE" {
   default = null
 }
@@ -147,6 +151,7 @@ group "base-extra" {
     "rcs-agent",
     "git-server",
     "config-loader",
+    "esv-shim",
   ]
 }
 
@@ -323,6 +328,20 @@ target "config-loader" {
   tags = "${tags("${REGISTRY}", "${REPOSITORY}", "config-loader", "${BUILD_TAG}")}"
   cache-to = ["mode=max,type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/config-loader:build-cache"]
   cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/config-loader:build-cache"]
+}
+
+target "esv-shim" {
+  inherits = ["base"]
+
+  context = "./esv-shim"
+  dockerfile = "Dockerfile"
+  args = {
+    FROM_IMAGE = ESV_SHIM_FROM_IMAGE
+  }
+
+  tags = "${tags("${REGISTRY}", "${REPOSITORY}", "esv-shim", "${BUILD_TAG}")}"
+  cache-to = ["mode=max,type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/esv-shim:build-cache"]
+  cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/esv-shim:build-cache"]
 }
 
 target "admin-ui" {

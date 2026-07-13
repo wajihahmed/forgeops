@@ -15,3 +15,4 @@ resources:
   - ./login-ui
   - ./gitea
   - ./gitea-seed
+  - ./esv-shim

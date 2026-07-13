@@ -13,6 +13,19 @@ spec:
         env:
         - name: CATALINA_USER_OPTS
           value: "-Dam.server.protocol=https -Dam.server.fqdn=prod.iam.example.com -Dam.server.port=443"
+        envFrom:
+        - secretRef:
+            name: am-env-secrets
+        - configMapRef:
+            name: platform-config
+        - secretRef:
+            name: ds-env-secrets
+        - configMapRef:
+            name: esv-variables
+            optional: true
+        - secretRef:
+            name: esv-secrets
+            optional: true
       initContainers:
       - name: load-config-clone
         resources: {}

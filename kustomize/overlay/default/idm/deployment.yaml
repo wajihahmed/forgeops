@@ -10,6 +10,15 @@ spec:
       containers:
       - name: openidm
         resources: {}
+        envFrom:
+        - configMapRef:
+            name: idm
+        - configMapRef:
+            name: esv-variables
+            optional: true
+        - secretRef:
+            name: esv-secrets
+            optional: true
       initContainers:
       - name: load-config-clone
         resources: {}
