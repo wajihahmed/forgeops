@@ -153,7 +153,12 @@ Verify:
 kubectl get pods,svc -n fr-platform -l app=esv-shim
 ```
 
-See `ESV-SHIM.md` at the repo root for the full API reference and import instructions.
+**This step only deploys the shim — it does not import any ESV data.** `esv-variables`/
+`esv-secrets` stay empty through the rest of this deploy. Populating them from a real export file
+(e.g. `openam-perf-banc_esv-export.json`) via `tenant_util.py esv import --apply` is a manual
+follow-up today; see `ESV-SHIM.md`'s Roadmap/TODO and Verification sections for the exact command.
+The end goal is for `lodestar.py`/`tenant_util.py` to be able to run against this deployment as a
+mock AIC tenant — that's not wired into this skill yet.
 
 ## Step 6 — Deploy DS and secrets
 

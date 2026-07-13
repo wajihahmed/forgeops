@@ -132,6 +132,26 @@ Bound to a dedicated `esv-shim` ServiceAccount via a namespaced `RoleBinding`.
 
 `optional: true` is defensive; the objects are also pre-shipped as empty in `kustomize/base/esv-shim/`, so ordering with respect to the documented deploy sequence (step 11, AM/IDM last) is safe either way.
 
+## Roadmap / TODO
+
+**Goal: run `lodestar.py` (or `tenant_util.py`) against this ForgeOps deployment as if it were a real AIC "mock tenant."**
+
+Current state: `/deploy-mock-tenant` deploys the esv-shim service itself (Step 5) but does not
+import any ESV data — `esv-variables`/`esv-secrets` stay empty through the rest of the deploy.
+Populating them from a real export file (e.g. `openam-perf-banc_esv-export.json`) is a manual
+step today, run by hand against the shim's `esv import` endpoint after the deploy finishes (see
+Verification section below).
+
+Not yet done, needed for lodestar to treat this as a drop-in tenant target:
+- [ ] Wire an actual `esv import --apply` run into `/deploy-mock-tenant` (or a separate step/script)
+  so a fresh deploy ends with ESVs already populated, not just the shim running empty.
+- [ ] Same treatment for the *other* domains lodestar's `tenant_util.py` manages against a tenant —
+  journeys, OAuth2 clients, scripts, IDM managed objects/endpoints, secret store mappings, SAML2 —
+  none of which this shim (or ForgeOps generally) has an import path for yet. ESV was the first
+  slice; the rest of `tenant_util.py`'s domains are still real-AIC-only.
+- [ ] Decide whether the eventual "mock tenant" import is meant to be idempotent/re-runnable as
+  part of every deploy, or a one-time seed step like `gitea-seed`.
+
 ## Verification
 
 1. `docker build -t esv-shim:local docker/esv-shim/` (on OrbStack, build against the OrbStack docker context, e.g. `docker --context orbstack build ...`, since its Kubernetes pulls images from that daemon's local image store, not whichever context happens to be active)
