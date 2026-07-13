@@ -76,13 +76,26 @@ Start OrbStack from the macOS menu bar or `open -a OrbStack`.
      --namespace secret-generator --create-namespace --wait
    ```
 
-## Step 1 — Build the config-loader image
+## Step 1 — Build the config-loader and esv-shim images
 
 ```
 docker build -t config-loader:local docker/config-loader/
+docker build -t esv-shim:local docker/esv-shim/
 ```
 
-Verify with `docker images config-loader` — must show `config-loader:local`.
+Verify with `docker images config-loader esv-shim` — must show `config-loader:local` and `esv-shim:local`.
+
+**OrbStack docker-context gotcha:** OrbStack's Kubernetes pulls images from OrbStack's own Docker
+daemon, not necessarily whatever `docker` context is currently active on your Mac (e.g. if Colima
+is also installed, `docker build` may silently build into Colima's image store instead). Check the
+active context with `docker context ls`; if it's not `orbstack`, build with:
+```
+docker --context orbstack build -t config-loader:local docker/config-loader/
+docker --context orbstack build -t esv-shim:local docker/esv-shim/
+```
+Symptom if this is wrong: pods for `config-loader`/`esv-shim`-based images show `ImagePullBackOff`
+with `pull access denied for <image>, repository does not exist` even though `docker images` shows
+the tag locally — that's because it exists in the wrong daemon's store.
 
 ## Step 2 — Create the namespace
 
@@ -120,7 +133,29 @@ kubectl logs job/gitea-seed -n fr-platform -c seed
 
 The last line must be `Seeding complete`. If not, report the logs and stop.
 
-## Step 5 — Deploy DS and secrets
+## Step 5 — Deploy the ESV shim
+
+The ESV shim is a small FastAPI service that exposes an AIC ESV-compatible API
+(`PUT`-upsert `/environment/variables/{_id}` and `/environment/secrets/{_id}`, `POST
+/environment/restart`) backed by per-item Kubernetes ConfigMaps/Secrets, so ESV exports from a real
+AIC tenant can be imported into this dev stack. It is not wired into `bin/forgeops apply`'s
+component list (same as Gitea) — deploy it directly via kustomize:
+```
+kubectl apply -k kustomize/overlay/default/esv-shim/
+kubectl rollout status deployment/esv-shim -n fr-platform --timeout=60s
+```
+
+This also creates the empty `esv-variables` ConfigMap and `esv-secrets` Secret that AM/IDM's
+`envFrom` references — safe to create now since AM/IDM aren't deployed yet.
+
+Verify:
+```
+kubectl get pods,svc -n fr-platform -l app=esv-shim
+```
+
+See `ESV-SHIM.md` at the repo root for the full API reference and import instructions.
+
+## Step 6 — Deploy DS and secrets
 
 **IMPORTANT:** DS reads the `ds-passwords` Secret during its very first startup to set the admin
 password. If the secret is empty when DS first starts, `ds-set-passwords` will permanently fail
@@ -154,7 +189,7 @@ kubectl rollout status statefulset/ds-idrepo -n fr-platform --timeout=300s
 kubectl wait --for=condition=complete job/ds-set-passwords -n fr-platform --timeout=120s
 ```
 
-## Step 6 — Deploy keystore-create Job
+## Step 7 — Deploy keystore-create Job
 
 AM requires a `keystore` Secret before it can start. Deploy the keystore-create Job and wait for it:
 ```
@@ -175,7 +210,7 @@ kubectl logs -n fr-platform -l job-name=keystore-create -c keystore-create --tai
 The patch downloads a static `jq` binary from GitHub releases — internet access from within the
 cluster is required.
 
-## Step 7 — Issue the TLS certificate
+## Step 8 — Issue the TLS certificate
 
 Before deploying AM/IDM, issue the self-signed TLS cert for `prod.iam.example.com`:
 ```
@@ -189,13 +224,13 @@ kubectl get secret platform-tls -n fr-platform
 ```
 Must show `platform-tls   kubernetes.io/tls   2`. If cert-manager is not ready yet, wait 30s and retry.
 
-## Step 8 — Deploy AM, IDM, and admin-ui
+## Step 9 — Deploy AM, IDM, and admin-ui
 
 ```
 bin/forgeops apply -e default -n fr-platform am idm admin-ui
 ```
 
-## Step 9 — Deploy amster and fix idm-resource-server secret
+## Step 10 — Deploy amster and fix idm-resource-server secret
 
 Amster bootstraps AM with OAuth2 clients (idm-admin-ui, idm-resource-server, idm-provisioning, etc.).
 Without it the admin-ui OAuth2 flow has nothing to authenticate against.
@@ -250,7 +285,7 @@ kill %1 2>/dev/null
 ```
 Must return `HTTP/1.1 200`.
 
-## Step 10 — Verify FBC init containers
+## Step 11 — Verify FBC init containers
 
 Check AM init container logs:
 ```
@@ -267,7 +302,7 @@ kubectl logs -n fr-platform -l app=idm -c filesystem-init
 `load-config-clone` must contain `config-loader done`.
 `filesystem-init` must not contain any errors.
 
-## Step 11 — Health check
+## Step 12 — Health check
 
 Wait for AM, IDM, and admin-ui to roll out (up to 5 min each):
 ```
@@ -315,10 +350,10 @@ kubectl get pods -n fr-platform
 ```
 
 Expected: am `1/1 Running`, idm `1/1 Running`, admin-ui `1/1 Running`, ds-cts `1/1 Running`,
-ds-idrepo `1/1 Running`, gitea `1/1 Running`, keystore-create `Completed`,
+ds-idrepo `1/1 Running`, gitea `1/1 Running`, esv-shim `1/1 Running`, keystore-create `Completed`,
 ds-set-passwords `Completed`.
 
-## Step 12 — Browser access
+## Step 13 — Browser access
 
 AM and IDM are exposed via nginx at `https://prod.iam.example.com`.
 `/etc/hosts` must have `127.0.0.1 prod.iam.example.com`.

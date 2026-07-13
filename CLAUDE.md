@@ -324,16 +324,24 @@ Wrong order causes DS to initialize with an empty admin password, which cannot b
 
 **Correct order:**
 1. Install cert-manager, nginx ingress, and mittwald (cluster-wide, once)
-2. Build config-loader image: `docker build -t config-loader:local docker/config-loader/`
+2. Build config-loader and esv-shim images: `docker build -t config-loader:local docker/config-loader/`
+   and `docker build -t esv-shim:local docker/esv-shim/` (on OrbStack, use `docker --context orbstack build`
+   if a different docker context is active — OrbStack's Kubernetes only pulls from its own daemon's
+   image store)
 3. Create namespace: `kubectl create namespace fr-platform`
 4. Deploy Gitea: `kubectl apply -k kustomize/overlay/default/gitea/`
 5. Seed customer-config repo: `kubectl apply -k kustomize/overlay/default/gitea-seed/`
-6. Deploy DS and secrets: `bin/forgeops apply -e default -n fr-platform base ds-cts ds-idrepo`
-7. Wait for `ds-set-passwords` Job to complete
-8. Deploy keystore-create: `kubectl apply -k kustomize/overlay/default/keystore-create/`
-9. Wait for `keystore-create` Job to complete (downloads `jq` via curl — needs internet)
-10. Issue TLS cert: `kubectl apply -k kustomize/overlay/default/tls/`
-11. Deploy AM and IDM: `bin/forgeops apply -e default -n fr-platform am idm`
+6. Deploy the ESV shim: `kubectl apply -k kustomize/overlay/default/esv-shim/` (not wired into
+   `bin/forgeops apply`'s component list, same as Gitea — see `ESV-SHIM.md`)
+7. Deploy DS and secrets: `bin/forgeops apply -e default -n fr-platform base ds-cts ds-idrepo`
+8. Wait for `ds-set-passwords` Job to complete
+9. Deploy keystore-create: `kubectl apply -k kustomize/overlay/default/keystore-create/`
+10. Wait for `keystore-create` Job to complete (downloads `jq` via curl — needs internet)
+11. Issue TLS cert: `kubectl apply -k kustomize/overlay/default/tls/`
+12. Deploy AM, IDM, and admin-ui: `bin/forgeops apply -e default -n fr-platform am idm admin-ui`
+13. Deploy amster: `bin/forgeops apply -e default -n fr-platform amster`, then fix the
+    `idm-resource-server` OAuth2 client secret (amster's variable substitution for it is unreliable —
+    see `.claude/commands/deploy-fbc.md` Step 10 for the full fix)
 
 **Recovery if DS initialized with empty secret:**
 ```sh
@@ -431,7 +439,9 @@ The port-forward works because it tunnels over OrbStack's stable loopback (`127.
 ```
 docker/config-loader/Dockerfile                                    — config-loader image (Alpine + git + jq)
 docker/config-loader/clone-and-copy.sh                             — loader script
-docker/docker-bake.hcl                                             — added config-loader build target
+docker/esv-shim/Dockerfile                                          — esv-shim image (python:3.12-slim + FastAPI)
+docker/esv-shim/app/main.py                                         — ESV-compatible API (PUT-upsert, valueBase64)
+docker/docker-bake.hcl                                             — added config-loader + esv-shim build targets
 kustomize/base/am/secret-generator/am-deployment.yaml             — load-config-clone init container
 kustomize/base/am/secret-agent/am-deployment.yaml                 — load-config-clone init container
 kustomize/base/am/secret-generator/am-service.yaml                — targetPort: http (was https)
@@ -444,22 +454,25 @@ kustomize/base/idm/secret-generator/idm-ingress.yaml              — nginx, TLS
 kustomize/base/idm/secret-agent/idm-ingress.yaml                  — nginx, TLS
 kustomize/base/gitea/                                              — Gitea Deployment, Service, PVC
 kustomize/base/gitea-seed/                                         — seed Job + ConfigMap
+kustomize/base/esv-shim/                                            — esv-shim ServiceAccount/Role/RoleBinding, Deployment, Service, projection ConfigMap/Secret
 kustomize/overlay/default/gitea/                                   — overlay for Gitea
 kustomize/overlay/default/gitea-seed/                              — overlay for seed job
+kustomize/overlay/default/esv-shim/                                 — overlay for ESV shim
 kustomize/overlay/default/tls/certificate.yaml                     — ClusterIssuer + Certificate (platform-tls)
 kustomize/overlay/default/tls/kustomization.yaml                   — TLS overlay kustomization
-kustomize/overlay/default/kustomization.yaml                       — includes gitea + gitea-seed + tls
-kustomize/overlay/default/image-defaulter/kustomization.yaml       — config-loader:local image mapping
+kustomize/overlay/default/kustomization.yaml                       — includes gitea + gitea-seed + esv-shim + tls
+kustomize/overlay/default/image-defaulter/kustomization.yaml       — config-loader:local + esv-shim:local image mapping
 kustomize/overlay/default/keystore-create/keystore-type-patch.yaml — jq download + KEYSTORE_TYPE fix
 kustomize/overlay/default/keystore-create/role-binding.yaml        — namespace patched to fr-platform
-kustomize/overlay/default/am/deployment.yaml                       — CATALINA_USER_OPTS for am.server.fqdn
+kustomize/overlay/default/am/deployment.yaml                       — CATALINA_USER_OPTS for am.server.fqdn + esv-variables/esv-secrets envFrom
 kustomize/overlay/default/am/ingress-fqdn.yaml                     — host/TLS patched to prod.iam.example.com
-kustomize/overlay/default/idm/deployment.yaml                      — overlay patch uses load-config-clone
+kustomize/overlay/default/idm/deployment.yaml                      — overlay patch uses load-config-clone + esv-variables/esv-secrets envFrom
 kustomize/overlay/default/idm/ingress-fqdn.yaml                    — host/TLS patched to prod.iam.example.com
 kustomize/overlay/default/base/platform-config.yaml                — FQDN + AM_SERVER_FQDN = prod.iam.example.com
 kustomize/overlay/default/ds-idrepo/sts.yaml                       — storageClassName: local-path
 kustomize/overlay/default/ds-cts/sts.yaml                          — storageClassName: local-path
 bin/tunnel                                                          — port-forwards nginx 443 for browser access
+ESV-SHIM.md                                                         — ESV shim design doc + AIC-compatible API reference
 colima.md                                                           — Colima notes (superseded by OrbStack)
 .claude/commands/deploy-fbc.md                                      — /deploy-fbc slash command
 .claude/settings.json                                               — allow rules for kubectl/docker/forgeops
@@ -483,3 +496,6 @@ The command covers all 12 steps: prerequisites (cert-manager + nginx + mittwald)
 - **Gitea `DEFAULT_ADMIN_*` env vars don't work** in gitea:1.22 without running the install wizard. Admin user is created via `lifecycle.postStart` hook instead.
 - **keystore-create needs internet** — downloads a static `jq` binary from GitHub releases at runtime.
 - **`bin/tunnel` requires sudo** — port 443 is privileged on macOS.
+- **`docker build` may target the wrong daemon on OrbStack** — if another Docker context (e.g. Colima) is active, a plain `docker build -t esv-shim:local ...` builds into that daemon's image store, not OrbStack's. OrbStack's Kubernetes only pulls from OrbStack's own daemon, so the pod then shows `ImagePullBackOff` with `pull access denied` even though `docker images` shows the tag locally. Use `docker --context orbstack build ...` when unsure.
+- **ESV shim's `PUT` is an upsert, matching real AIC** — `PUT /environment/{secrets,variables}/{_id}` returns `201` if the id didn't exist and `200` if it did; there is no `POST`-to-create. Wire format is always `valueBase64` (base64-encoded), never a plain `value` field, and `GET /environment/secrets/{_id}` never returns the secret's value — only metadata. See `ESV-SHIM.md`.
+- **ESV shim changes require `POST /environment/restart` to take effect** — writes to `esv-var-*`/`esv-secret-*` objects are durable immediately, but AM/IDM only read the aggregated `esv-variables`/`esv-secrets` projection via `envFrom`, so `/environment/restart` must be called to re-project and roll-restart both deployments.
