@@ -43,7 +43,7 @@ spec:
           secret:
             secretName: amster
             items:
-              - key: id_rsa
+              - key: ssh-privatekey
                 path: id_rsa
         - name: platform-config
           configMap:

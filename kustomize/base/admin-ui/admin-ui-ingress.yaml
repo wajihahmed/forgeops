@@ -42,3 +42,10 @@ spec:
                 name: admin-ui
                 port:
                   number: 8080
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: admin-ui
+                port:
+                  number: 8080

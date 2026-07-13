@@ -4,3 +4,6 @@
 - op: replace
   path: '/spec/tls/0/hosts'
   value: ['prod.iam.example.com']
+- op: replace
+  path: '/spec/tls/0/secretName'
+  value: 'platform-tls'

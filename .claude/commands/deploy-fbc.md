@@ -189,13 +189,68 @@ kubectl get secret platform-tls -n fr-platform
 ```
 Must show `platform-tls   kubernetes.io/tls   2`. If cert-manager is not ready yet, wait 30s and retry.
 
-## Step 8 — Deploy AM and IDM
+## Step 8 — Deploy AM, IDM, and admin-ui
 
 ```
-bin/forgeops apply -e default -n fr-platform am idm
+bin/forgeops apply -e default -n fr-platform am idm admin-ui
 ```
 
-## Step 9 — Verify FBC init containers
+## Step 9 — Deploy amster and fix idm-resource-server secret
+
+Amster bootstraps AM with OAuth2 clients (idm-admin-ui, idm-resource-server, idm-provisioning, etc.).
+Without it the admin-ui OAuth2 flow has nothing to authenticate against.
+
+```
+bin/forgeops apply -e default -n fr-platform amster
+kubectl wait --for=condition=complete job/amster -n fr-platform --timeout=300s
+kubectl logs job/amster -n fr-platform -c amster | tail -5
+```
+
+The last line must be `Import done`. If it says `Amster import errors`, stop and investigate.
+
+**Fix idm-resource-server secret (required — amster does not set this correctly):**
+
+Amster imports the `idm-resource-server` OAuth2 client but the `&{idm.rs.client.secret|...}`
+variable substitution does not reliably set the client secret in AM. IDM uses this client to
+introspect Bearer tokens; if the secret is wrong, IDM hangs for 30 seconds on every authenticated
+request and the admin-ui shows a blank page.
+
+1. Open the AM console at `https://prod.iam.example.com/am/ui-admin/`
+2. Go to **Applications → OAuth 2.0 → Clients → idm-resource-server → Core**
+3. Set **Client secret** to the value of `IDM_RS_CLIENT_SECRET` from the `amster-env-secrets`
+   Kubernetes secret:
+   ```
+   kubectl get secret amster-env-secrets -n fr-platform \
+     -o jsonpath='{.data.IDM_RS_CLIENT_SECRET}' | base64 -d
+   ```
+4. Save the client in the AM console.
+
+Then patch the Kubernetes secret so IDM's env var matches whatever value is now in AM:
+```
+kubectl patch secret amster-env-secrets -n fr-platform \
+  --type='json' \
+  -p='[{"op":"replace","path":"/data/IDM_RS_CLIENT_SECRET","value":"'"$(kubectl get secret amster-env-secrets -n fr-platform -o jsonpath='{.data.IDM_RS_CLIENT_SECRET}')"'"}]'
+kubectl rollout restart deployment/idm -n fr-platform
+kubectl rollout status deployment/idm -n fr-platform --timeout=120s
+```
+
+Verify IDM can now introspect tokens (should return in under 1 second):
+```
+PROV_SECRET=$(kubectl get secret amster-env-secrets -n fr-platform \
+  -o jsonpath='{.data.IDM_PROVISIONING_CLIENT_SECRET}' | base64 -d)
+ACCESS_TOKEN=$(curl -sk -X POST "https://prod.iam.example.com/am/oauth2/access_token" \
+  -d "grant_type=client_credentials&scope=fr:idm:*" \
+  -u "idm-provisioning:$PROV_SECRET" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+IDM_POD=$(kubectl get pod -n fr-platform -l app=idm -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n fr-platform pod/$IDM_POD 18180:8080 >/tmp/pf-idm-check.log 2>&1 &
+sleep 3
+curl -si --max-time 5 http://localhost:18180/openidm/info/uiconfig \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | head -1
+kill %1 2>/dev/null
+```
+Must return `HTTP/1.1 200`.
+
+## Step 10 — Verify FBC init containers
 
 Check AM init container logs:
 ```
@@ -212,12 +267,13 @@ kubectl logs -n fr-platform -l app=idm -c filesystem-init
 `load-config-clone` must contain `config-loader done`.
 `filesystem-init` must not contain any errors.
 
-## Step 10 — Health check
+## Step 11 — Health check
 
-Wait for AM and IDM to roll out (up to 5 min each):
+Wait for AM, IDM, and admin-ui to roll out (up to 5 min each):
 ```
 kubectl rollout status deployment/am -n fr-platform --timeout=300s
 kubectl rollout status deployment/idm -n fr-platform --timeout=300s
+kubectl rollout status deployment/admin-ui -n fr-platform --timeout=300s
 ```
 
 Health-check AM via pod port-forward:
@@ -242,15 +298,27 @@ kill %1 2>/dev/null
 
 IDM must return `{"state":"ACTIVE_READY"}`.
 
+Check admin-ui:
+```
+ADMIN_UI_POD=$(kubectl get pod -n fr-platform -l app=admin-ui -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n fr-platform pod/$ADMIN_UI_POD 18280:8080 > /tmp/pf-admin-ui.log 2>&1 &
+sleep 4
+curl -si http://localhost:18280/ | head -1
+kill %1 2>/dev/null
+```
+
+Must return `HTTP/1.1 200`.
+
 Show the final pod status:
 ```
 kubectl get pods -n fr-platform
 ```
 
-Expected: am `1/1 Running`, idm `1/1 Running`, ds-cts `1/1 Running`, ds-idrepo `1/1 Running`,
-gitea `1/1 Running`, keystore-create `Completed`, ds-set-passwords `Completed`.
+Expected: am `1/1 Running`, idm `1/1 Running`, admin-ui `1/1 Running`, ds-cts `1/1 Running`,
+ds-idrepo `1/1 Running`, gitea `1/1 Running`, keystore-create `Completed`,
+ds-set-passwords `Completed`.
 
-## Step 11 — Browser access
+## Step 12 — Browser access
 
 AM and IDM are exposed via nginx at `https://prod.iam.example.com`.
 `/etc/hosts` must have `127.0.0.1 prod.iam.example.com`.
@@ -265,7 +333,8 @@ Note: even with `hostNetwork=true`, the OrbStack node IP is blocked by CrowdStri
 over loopback is required and works reliably.
 
 URLs:
-- AM:  `https://prod.iam.example.com/am`  (self-signed cert — accept browser warning)
-- IDM: `https://prod.iam.example.com/openidm`
+- AM:       `https://prod.iam.example.com/am`        (self-signed cert — accept browser warning)
+- IDM:      `https://prod.iam.example.com/openidm`
+- Admin UI: `https://prod.iam.example.com/platform`
 
 To stop: `bin/tunnel stop`

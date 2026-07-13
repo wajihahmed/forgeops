@@ -471,7 +471,7 @@ colima.md                                                           — Colima n
 
 `.claude/commands/deploy-fbc.md` defines a `/deploy-fbc` slash command that automates the full deploy sequence. Requires a Claude Code restart to appear.
 
-The command covers all 11 steps: prerequisites (cert-manager + nginx + mittwald), config-loader build, namespace, Gitea, seed, DS+secrets (with ds-set-passwords wait and recovery instructions), keystore-create, TLS cert, AM+IDM, and health checks.
+The command covers all 12 steps: prerequisites (cert-manager + nginx + mittwald), config-loader build, namespace, Gitea, seed, DS+secrets (with ds-set-passwords wait and recovery instructions), keystore-create, TLS cert, AM+IDM+admin-ui, amster (with idm-resource-server secret fix), and health checks.
 
 ---
 

@@ -56,13 +56,6 @@ spec:
                 name: idm
                 port:
                   number: 80
-          - path: /admin
-            pathType: Prefix
-            backend:
-              service:
-                name: idm
-                port:
-                  number: 80
           - path: /openicf
             pathType: Prefix
             backend:

@@ -62,7 +62,21 @@
       "Bash(kubectl -n ingress-nginx get deployment ingress-nginx-controller -o jsonpath='{.spec.template.spec.containers[0].args}')",
       "Bash(python3 -c \"import sys,json,base64; d=json.load\\(sys.stdin\\); [print\\(k,'=',base64.b64decode\\(v\\).decode\\(\\)\\) for k,v in d.items\\(\\)]\")",
       "Bash(git checkout *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "mcp__plugin_polaris_atlassian__getConfluencePage",
+      "Bash(python3 -c \"import docx; print\\('python-docx available'\\)\")",
+      "Bash(pip3 install *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(k\\) for k in d.keys\\(\\)]\")",
+      "Bash(python3 -c \"import sys; d=sys.stdin.read\\(\\); print\\(d[-200:]\\)\")",
+      "Bash(docker pull *)",
+      "Bash(docker create *)",
+      "Bash(docker cp *)",
+      "Bash(docker rm *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c 'import urllib.parse; print\\(urllib.parse.quote\\('\\\\''uKIr0dD9VJbTmR2K+cDnjl/z'\\\\''\\)\\)')",
+      "mcp__plugin_polaris_glean__read_document",
+      "Bash(xargs -I{} sh -c 'echo \"== {} ==\"; cat {}')"
     ]
   }
 }
