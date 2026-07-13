@@ -134,7 +134,14 @@ Bound to a dedicated `esv-shim` ServiceAccount via a namespaced `RoleBinding`.
 
 ## Roadmap / TODO
 
-**Goal: run `lodestar.py` (or `tenant_util.py`) against this ForgeOps deployment as if it were a real AIC "mock tenant."**
+**Precise end goal:** be able to run, unmodified in spirit, something like:
+```sh
+./lodestar.py tenant apply-customer-configuration --project-id <gcp-project-id> --name <tenant-name> --customer-configuration banc
+```
+against this ForgeOps deployment as if it were a real AIC "mock tenant" — i.e. `banc`'s full
+customer-configuration export directory (ESV, IDM managed objects/endpoints, services, secret
+store mappings, SAML2, scripts, journeys, OAuth2 clients — see
+`shared/config/tenant-customer-configurations/banc/` in the lodestar repo) applies cleanly.
 
 Current state: `/deploy-mock-tenant` deploys the esv-shim service itself (Step 5) but does not
 import any ESV data — `esv-variables`/`esv-secrets` stay empty through the rest of the deploy.
@@ -142,13 +149,36 @@ Populating them from a real export file (e.g. `openam-perf-banc_esv-export.json`
 step today, run by hand against the shim's `esv import` endpoint after the deploy finishes (see
 Verification section below).
 
+Notes from investigating `lodestar.py`'s command path (`shared/scripts/lodestar_tool/commands/tenant_apply_customer_configuration_command.py`
+→ `Tenant.apply_customer_configuration` / `apply_customer_configuration_from_export` in
+`shared/lib/tenant/tenant.py` → `TenantConfigImporter.run` in `shared/lib/tenant/tenant_config_importer.py`),
+without making any code changes:
+- `--project-id` is GCP-only: it's resolved to a `TenantGkeProject` and used for `gcloud source repos clone`
+  (the git-based/FBC config path) and GKE-specific log queries — not used at all by the API-export
+  path (`apply_customer_configuration_from_export`), which only needs a hostname, admin email, and
+  `--password` to build an `AMAIC` client and call `TenantConfigImporter.run(conf_dir)`.
+- The API-export path builds its target hostname as `openam-<tenant-name>.forgeblocks.com` — hardcoded
+  to `TENANT_DOMAIN = "forgeblocks.com"` in `shared/lib/utils/constants.py`. A mock-tenant mode would
+  need this to resolve to something like `prod.iam.example.com` (or per-tenant-name local hostnames)
+  instead.
+- `TenantConfigImporter.run` already fans out across ESV, IDM managed objects/endpoints, services,
+  secret store mappings, SAML2, scripts, journeys, and OAuth2 clients — so once ESV is solid, the
+  remaining work per-domain is largely "does ForgeOps expose the same AM/IDM REST endpoints these
+  `_import_*` helpers call," not new lodestar-side plumbing.
+
 Not yet done, needed for lodestar to treat this as a drop-in tenant target:
 - [ ] Wire an actual `esv import --apply` run into `/deploy-mock-tenant` (or a separate step/script)
   so a fresh deploy ends with ESVs already populated, not just the shim running empty.
-- [ ] Same treatment for the *other* domains lodestar's `tenant_util.py` manages against a tenant —
-  journeys, OAuth2 clients, scripts, IDM managed objects/endpoints, secret store mappings, SAML2 —
-  none of which this shim (or ForgeOps generally) has an import path for yet. ESV was the first
-  slice; the rest of `tenant_util.py`'s domains are still real-AIC-only.
+- [ ] Same treatment for the *other* domains lodestar's `tenant_util.py`/`TenantConfigImporter` manages
+  against a tenant — journeys, OAuth2 clients, scripts, IDM managed objects/endpoints, secret store
+  mappings, SAML2 — none of which this shim (or ForgeOps generally) has an import path for yet. ESV
+  was the first slice; the rest are still real-AIC-only, but since AM/IDM (not the ESV shim) serve
+  those APIs directly, they may need little or no shim-side work if the actual AM/IDM REST endpoints
+  `TenantConfigImporter`'s `_import_*` helpers call already exist in stock ForgeOps.
+- [ ] Add a `--mock-tenant` switch to `tenant_apply_customer_configuration_command.py` (or equivalent)
+  that skips `--project-id` entirely and resolves the target hostname/URL against this ForgeOps
+  deployment (e.g. `prod.iam.example.com`) instead of `openam-<name>.forgeblocks.com`. **Not done yet
+  — explicitly requires code changes in the lodestar repo, out of scope until asked for.**
 - [ ] Decide whether the eventual "mock tenant" import is meant to be idempotent/re-runnable as
   part of every deploy, or a one-time seed step like `gitea-seed`.
 
