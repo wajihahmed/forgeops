@@ -8,9 +8,19 @@ The goal is a small sidecar **control-plane service** — not a change to AM/IDM
 
 Decisions already made with the user:
 - **Language:** Python + FastAPI (matches repo's existing python3 usage in `bin/`, has a mature k8s client)
-- **Storage model:** one Kubernetes object per ESV item (`esv-var-<name>` ConfigMap, `esv-secret-<name>` Secret) — trivial CRUD, per-item metadata via annotations
+- **Storage model:** one Kubernetes object per ESV item (`esv-var-<id>` ConfigMap, `esv-secret-<id>` Secret) — trivial CRUD, per-item metadata via annotations
 - **Apply mechanism:** aggregate all ESV items into a projection object consumed via `envFrom`, then roll-restart AM/IDM
 - **Auth:** none for now — ClusterIP only, cluster-internal, same access model as Gitea
+
+**Wire-format compatibility validated against real AIC clients.** The initial version of this API used a made-up shape (`POST` to create, plain `value` field, `name`/`showSecretValue` params). That was checked against the actual ESV write path used in production tooling — `/Users/wajih.ahmed/work/qa-lodestar-fork-mock-api/shared/scripts/tenant_util.py` and `shared/lib/tenant/tenant_config_importer.py` (byte-identical ESV logic also lives in `perf-tools/tenant_util.py`) — and it didn't match. The real AIC ESV API:
+- Has **no POST-to-create**. Every write is `PUT /environment/{secrets,variables}/{_id}`, which upserts: `201` if the id didn't exist, `200` if it did.
+- Sends values as `valueBase64` (always base64-encoded), never a plain `value` field.
+- Secrets carry `encoding` (`generic`/`pem`/`base64hmac`/`base64aes`) and `useInPlaceholders`; variables carry `expressionType` (`string`/`number`/`int`/`object`/`array`).
+- Identifies items by `_id` in responses, not `name`.
+- Never returns a secret's value on GET — `GET /environment/secrets/{_id}` returns metadata only (encoding, description, version). Lodestar retrieves clear-text secret values through a separate IDM script-eval endpoint, not the ESV API itself.
+- Has a `POST /environment/restart` endpoint (not `/environment/apply`) that AM must be sent after an ESV import, since ESVs aren't hot-swappable.
+
+The API below reflects the corrected, verified contract. It was validated by running lodestar's actual `tenant_util.py esv import --apply` CLI against a live deployment of this shim, using the real `openam-perf-banc_esv-export.json` export file (11 secrets, 13 variables) — all 24 items imported with `201` on first run and `200` on re-run, and decoded values (including a nested JSON object variable) matched the source file exactly after projection.
 
 ## Architecture
 
@@ -21,43 +31,51 @@ Client (curl / script)
 esv-shim (FastAPI, Deployment+Service in fr-platform)
    │  uses Kubernetes Python client (in-cluster ServiceAccount token)
    ▼
-Per-item objects (source of truth, CRUD target):
-   ConfigMap  esv-var-<name>      data: {value: "..."}     annotations: description, updatedAt
-   Secret     esv-secret-<name>   data: {value: "..."}     annotations: description, updatedAt
+Per-item objects (source of truth, PUT-upsert target):
+   ConfigMap  esv-var-<_id>      data: {value: "<plain>"}       annotations: description, expressionType, updatedAt
+   Secret     esv-secret-<_id>   data: {value: "<valueBase64>"} annotations: description, encoding, useInPlaceholders, updatedAt
    label on both: esv.forgeops/managed=true, esv.forgeops/type=variable|secret
 
-"Apply" step (triggered by POST /environment/apply):
+   Note: for secrets, the client-supplied valueBase64 is stored verbatim as the
+   Secret's data value (Kubernetes Secret.data is itself base64, so no re-encoding
+   happens). For variables, valueBase64 is decoded once and the plain value is
+   stored in the ConfigMap, then re-encoded back to valueBase64 on GET.
+
+"Restart" step (triggered by POST /environment/restart, POST /environment/apply as a compatibility alias):
    1. List all esv-var-* / esv-secret-* objects by label
    2. Project their key/value pairs into two aggregate objects that AM/IDM already mount via envFrom:
-        ConfigMap  esv-variables   (merged variable data)
-        Secret     esv-secrets     (merged secret data)
+        ConfigMap  esv-variables   (merged variable data, plain values)
+        Secret     esv-secrets     (merged secret data, plain values)
    3. Patch Deployment am and Deployment idm with a
-      `esv.forgeops/restartedAt: <timestamp>` pod-template annotation
+      `esv.forgeops/restarted-at: <timestamp>` pod-template annotation
       → triggers a rollout restart (same effect as the documented
         `kubectl rollout restart deployment/am -n fr-platform`)
 ```
 
 Per-item objects stay the CRUD surface (so `GET /environment/variables/foo` is a direct 1:1 read of `esv-var-foo`); the aggregate `esv-variables`/`esv-secrets` objects exist purely so AM/IDM can consume everything through a single stable `envFrom` reference, instead of the shim having to rewrite the Deployment spec every time an item is added.
 
+**Why a separate restart step exists at all when real AIC's PUT is already durable:** it is — a `PUT` to `/environment/secrets/{_id}` in this shim is immediately persisted to its ConfigMap/Secret, matching AIC. But AM/IDM here read ESV data via `envFrom` referencing the aggregate `esv-variables`/`esv-secrets` objects, not via a live property store, so `/environment/restart` (mirroring what `tenant_config_importer.py`'s `_restart_am_for_esv()` actually calls) both re-projects and restarts, matching the real "ESVs aren't hot-swappable, AM must restart" behavior lodestar already codes around.
+
 **Why not merge directly into `platform-config`:** AM's `envFrom` pulls `platform-config`, but IDM's `envFrom` pulls its own `idm` ConfigMap — there's no single object both containers already read from. Introducing new `esv-variables`/`esv-secrets` objects (shipped empty as base resources, referenced by a new `envFrom` entry added to both `am` and `idm` overlay deployment patches) avoids commingling shim-owned runtime state with the chart/kustomize-declared `platform-config` and `idm` ConfigMaps, which are re-applied verbatim on every `bin/forgeops apply`.
 
 ## API Surface
 
-All routes prefixed `/environment` to look AIC-ESV-shaped:
+Matches the real AIC ESV wire contract, verified against lodestar's `tenant_util.py`:
 
-| Method | Path | Action |
+| Method | Path | Body / Response |
 |---|---|---|
-| POST | `/environment/variables` | create variable `{name, value, description?}` |
-| GET | `/environment/variables` | list variables |
-| GET | `/environment/variables/{name}` | get one |
-| PUT | `/environment/variables/{name}` | update value/description |
-| DELETE | `/environment/variables/{name}` | delete |
-| POST | `/environment/secrets` | create secret `{name, value, description?}` |
-| GET | `/environment/secrets` | list secrets (values redacted) |
-| GET | `/environment/secrets/{name}?showSecretValue=true` | get one (redacted by default) |
-| PUT | `/environment/secrets/{name}` | update value/description |
-| DELETE | `/environment/secrets/{name}` | delete |
-| POST | `/environment/apply` | run the apply step described above (project + restart am/idm) |
+| GET | `/environment/variables` | `{"result": [...], "resultCount": N}`, each item `{_id, valueBase64, description, expressionType, lastChangeDate, lastChangedBy, loaded}` |
+| GET | `/environment/variables/{_id}` | single item, same shape |
+| PUT | `/environment/variables/{_id}` | request `{valueBase64, description?, expressionType?}` — upsert: `201` created / `200` updated |
+| DELETE | `/environment/variables/{_id}` | `204` |
+| GET | `/environment/secrets` | `{"result": [...], "resultCount": N}`, each item `{_id, activeVersion, loadedVersion, description, encoding, useInPlaceholders, lastChangeDate, lastChangedBy, loaded}` — **no value field**, matching real AIC |
+| GET | `/environment/secrets/{_id}` | single item metadata, same shape (no value) |
+| PUT | `/environment/secrets/{_id}` | request `{valueBase64, description?, encoding?, useInPlaceholders?}` — upsert: `201` created / `200` updated |
+| DELETE | `/environment/secrets/{_id}` | `204` |
+| POST | `/environment/restart` | project all items into `esv-variables`/`esv-secrets` + rolling-restart am/idm; `{variableCount, secretCount, restarted}` |
+| POST | `/environment/apply` | alias of `/environment/restart`, kept for convenience — not part of the real AIC API |
+
+No `POST`-to-create exists on `/environment/variables` or `/environment/secrets` collections — this intentionally matches AIC, where creation and update are both done via `PUT .../{_id}`.
 
 ## RBAC
 
@@ -116,14 +134,18 @@ Bound to a dedicated `esv-shim` ServiceAccount via a namespaced `RoleBinding`.
 
 ## Verification
 
-1. `docker build -t esv-shim:local docker/esv-shim/`
+1. `docker build -t esv-shim:local docker/esv-shim/` (on OrbStack, build against the OrbStack docker context, e.g. `docker --context orbstack build ...`, since its Kubernetes pulls images from that daemon's local image store, not whichever context happens to be active)
 2. `bin/forgeops apply -e default -n fr-platform base` (or full deploy per CLAUDE.md's Deploy Order) — confirm `esv-shim` Deployment/Service/Role come up: `kubectl get pods,svc -n fr-platform -l app=esv-shim`
 3. Port-forward: `kubectl port-forward -n fr-platform svc/esv-shim 8090:8080`
-4. Exercise the API:
+4. Real-client verification (strongest check — this is what was actually run): use lodestar's own CLI against the shim instead of hand-written curl:
    ```sh
-   curl -s -X POST localhost:8090/environment/variables -d '{"name":"esv-test","value":"hello"}' -H 'Content-Type: application/json'
-   curl -s localhost:8090/environment/variables
-   curl -s -X POST localhost:8090/environment/apply
+   echo "faketoken" > at.txt   # tenant_util.py just needs a bearer token file to exist
+   python3 /Users/wajih.ahmed/work/qa-lodestar-fork-mock-api/shared/scripts/tenant_util.py esv import \
+     --target http://localhost:8090 \
+     --file /Users/wajih.ahmed/work/qa-lodestar-fork-mock-api/shared/config/tenant-customer-configurations/banc/openam-perf-banc_esv-export.json \
+     --apply
+   python3 /Users/wajih.ahmed/work/qa-lodestar-fork-mock-api/shared/scripts/tenant_util.py esv list --source http://localhost:8090
    ```
-5. Confirm projection + restart: `kubectl get cm esv-variables -n fr-platform -o yaml` shows the merged key, and `kubectl rollout status deployment/am -n fr-platform` shows a fresh rollout after the apply call.
-6. Confirm AM/IDM pods actually see the value: `kubectl exec <am-pod> -n fr-platform -- env | grep esv-test`.
+   Expect all secrets/variables to report `OK (HTTP 201)` on first run, `OK (HTTP 200)` on re-run, and `esv list` to show correct `_id`, `encoding`/`expressionType`, and `description` for every item.
+5. Confirm projection + restart: `curl -X POST localhost:8090/environment/restart` then `kubectl get cm esv-variables -n fr-platform -o yaml` / `kubectl get secret esv-secrets -n fr-platform -o yaml` show merged, correctly-decoded data, and `kubectl rollout status deployment/am -n fr-platform` shows a fresh rollout.
+6. Confirm AM/IDM pods actually see the value: `kubectl exec <am-pod> -n fr-platform -- env | grep <esv-id>`.

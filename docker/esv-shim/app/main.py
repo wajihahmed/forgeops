@@ -4,7 +4,7 @@ import os
 import re
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Response
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel
@@ -14,6 +14,9 @@ NAMESPACE = os.environ.get("NAMESPACE", "fr-platform")
 MANAGED_LABEL = "esv.forgeops/managed"
 TYPE_LABEL = "esv.forgeops/type"
 DESC_ANNOTATION = "esv.forgeops/description"
+ENCODING_ANNOTATION = "esv.forgeops/encoding"
+USE_IN_PLACEHOLDERS_ANNOTATION = "esv.forgeops/use-in-placeholders"
+EXPRESSION_TYPE_ANNOTATION = "esv.forgeops/expression-type"
 UPDATED_ANNOTATION = "esv.forgeops/updated-at"
 RESTART_ANNOTATION = "esv.forgeops/restarted-at"
 
@@ -23,7 +26,8 @@ PROJECTION_CONFIGMAP_NAME = "esv-variables"
 PROJECTION_SECRET_NAME = "esv-secrets"
 RESTART_DEPLOYMENTS = ["am", "idm"]
 
-NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+# ESV ids observed in the wild look like "esv-hmac-sha256-key-2" / "esv-error-map".
+ID_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 try:
     config.load_incluster_config()
@@ -35,83 +39,84 @@ apps_v1 = client.AppsV1Api()
 
 app = FastAPI(
     title="ESV Shim",
-    description="AIC ESV-shaped API backed by Kubernetes ConfigMaps/Secrets",
+    description="AIC ESV-compatible API (PUT-upsert, valueBase64 wire format) backed by "
+    "Kubernetes ConfigMaps/Secrets",
 )
 
 
-class VariableCreate(BaseModel):
-    name: str
-    value: str
-    description: Optional[str] = None
+class VariablePut(BaseModel):
+    valueBase64: str
+    description: Optional[str] = ""
+    expressionType: Optional[str] = "string"
 
 
-class VariableUpdate(BaseModel):
-    value: Optional[str] = None
-    description: Optional[str] = None
+class SecretPut(BaseModel):
+    valueBase64: str
+    description: Optional[str] = ""
+    encoding: Optional[str] = "generic"
+    useInPlaceholders: Optional[bool] = True
 
 
-class SecretCreate(BaseModel):
-    name: str
-    value: str
-    description: Optional[str] = None
-
-
-class SecretUpdate(BaseModel):
-    value: Optional[str] = None
-    description: Optional[str] = None
-
-
-def validate_name(name: str) -> str:
-    if len(name) > 200 or not NAME_RE.match(name):
+def validate_id(esv_id: str) -> str:
+    if len(esv_id) > 200 or not ID_RE.match(esv_id):
         raise HTTPException(
             status_code=400,
-            detail="name must be a lowercase alphanumeric string, optionally "
+            detail="id must be a lowercase alphanumeric string, optionally "
             "with internal dashes (max 200 chars)",
         )
-    return name
+    return esv_id
 
 
 def now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def get_configmap_or_404(cm_name: str, display_name: str):
+def get_configmap_or_404(cm_name: str, display_id: str):
     try:
         return core_v1.read_namespaced_config_map(cm_name, NAMESPACE)
     except ApiException as e:
         if e.status == 404:
-            raise HTTPException(status_code=404, detail=f"variable '{display_name}' not found")
+            raise HTTPException(status_code=404, detail=f"variable '{display_id}' not found")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def get_secret_or_404(secret_name: str, display_name: str):
+def get_secret_or_404(secret_name: str, display_id: str):
     try:
         return core_v1.read_namespaced_secret(secret_name, NAMESPACE)
     except ApiException as e:
         if e.status == 404:
-            raise HTTPException(status_code=404, detail=f"secret '{display_name}' not found")
+            raise HTTPException(status_code=404, detail=f"secret '{display_id}' not found")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def configmap_to_item(cm) -> dict:
+def configmap_to_variable(cm) -> dict:
+    """Variables are metadata + valueBase64 — AIC returns the value directly on GET."""
     annotations = cm.metadata.annotations or {}
+    plain = (cm.data or {}).get("value", "")
     return {
-        "name": cm.metadata.name[len(VAR_PREFIX):],
-        "value": (cm.data or {}).get("value", ""),
-        "description": annotations.get(DESC_ANNOTATION) or None,
-        "updatedAt": annotations.get(UPDATED_ANNOTATION),
+        "_id": cm.metadata.name[len(VAR_PREFIX):],
+        "valueBase64": base64.b64encode(plain.encode()).decode(),
+        "description": annotations.get(DESC_ANNOTATION, ""),
+        "expressionType": annotations.get(EXPRESSION_TYPE_ANNOTATION, "string"),
+        "lastChangeDate": annotations.get(UPDATED_ANNOTATION),
+        "lastChangedBy": "esv-shim",
+        "loaded": True,
     }
 
 
-def secret_to_item(secret, reveal: bool) -> dict:
+def secret_to_metadata(secret) -> dict:
+    """Secrets never expose their value via GET — matches the real ESV API."""
     annotations = secret.metadata.annotations or {}
-    raw = (secret.data or {}).get("value")
-    value = base64.b64decode(raw).decode() if raw else ""
     return {
-        "name": secret.metadata.name[len(SECRET_PREFIX):],
-        "value": value if reveal else "********",
-        "description": annotations.get(DESC_ANNOTATION) or None,
-        "updatedAt": annotations.get(UPDATED_ANNOTATION),
+        "_id": secret.metadata.name[len(SECRET_PREFIX):],
+        "activeVersion": "1",
+        "loadedVersion": "1",
+        "description": annotations.get(DESC_ANNOTATION, ""),
+        "encoding": annotations.get(ENCODING_ANNOTATION, "generic"),
+        "useInPlaceholders": annotations.get(USE_IN_PLACEHOLDERS_ANNOTATION, "true") == "true",
+        "lastChangeDate": annotations.get(UPDATED_ANNOTATION),
+        "lastChangedBy": "esv-shim",
+        "loaded": True,
     }
 
 
@@ -120,136 +125,131 @@ def healthz():
     return {"status": "ok"}
 
 
-@app.post("/environment/variables", status_code=201)
-def create_variable(body: VariableCreate):
-    name = validate_name(body.name)
-    cm_name = VAR_PREFIX + name
-    try:
-        core_v1.read_namespaced_config_map(cm_name, NAMESPACE)
-        raise HTTPException(status_code=409, detail=f"variable '{name}' already exists")
-    except ApiException as e:
-        if e.status != 404:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    cm = client.V1ConfigMap(
-        metadata=client.V1ObjectMeta(
-            name=cm_name,
-            labels={MANAGED_LABEL: "true", TYPE_LABEL: "variable"},
-            annotations={
-                DESC_ANNOTATION: body.description or "",
-                UPDATED_ANNOTATION: now(),
-            },
-        ),
-        data={"value": body.value},
-    )
-    core_v1.create_namespaced_config_map(NAMESPACE, cm)
-    return configmap_to_item(core_v1.read_namespaced_config_map(cm_name, NAMESPACE))
-
-
 @app.get("/environment/variables")
 def list_variables():
     cms = core_v1.list_namespaced_config_map(NAMESPACE, label_selector=f"{TYPE_LABEL}=variable")
-    return {"result": [configmap_to_item(cm) for cm in cms.items]}
+    result = [configmap_to_variable(cm) for cm in cms.items]
+    return {"result": result, "resultCount": len(result)}
 
 
-@app.get("/environment/variables/{name}")
-def get_variable(name: str):
-    name = validate_name(name)
-    cm = get_configmap_or_404(VAR_PREFIX + name, name)
-    return configmap_to_item(cm)
+@app.get("/environment/variables/{esv_id}")
+def get_variable(esv_id: str):
+    esv_id = validate_id(esv_id)
+    cm = get_configmap_or_404(VAR_PREFIX + esv_id, esv_id)
+    return configmap_to_variable(cm)
 
 
-@app.put("/environment/variables/{name}")
-def update_variable(name: str, body: VariableUpdate):
-    name = validate_name(name)
-    cm_name = VAR_PREFIX + name
-    cm = get_configmap_or_404(cm_name, name)
+@app.put("/environment/variables/{esv_id}")
+def put_variable(esv_id: str, body: VariablePut, response: Response):
+    esv_id = validate_id(esv_id)
+    cm_name = VAR_PREFIX + esv_id
 
-    if body.value is not None:
-        cm.data = {**(cm.data or {}), "value": body.value}
-
-    annotations = dict(cm.metadata.annotations or {})
-    if body.description is not None:
-        annotations[DESC_ANNOTATION] = body.description
-    annotations[UPDATED_ANNOTATION] = now()
-    cm.metadata.annotations = annotations
-
-    core_v1.replace_namespaced_config_map(cm_name, NAMESPACE, cm)
-    return configmap_to_item(core_v1.read_namespaced_config_map(cm_name, NAMESPACE))
-
-
-@app.delete("/environment/variables/{name}", status_code=204)
-def delete_variable(name: str):
-    name = validate_name(name)
-    cm_name = VAR_PREFIX + name
-    get_configmap_or_404(cm_name, name)
-    core_v1.delete_namespaced_config_map(cm_name, NAMESPACE)
-    return None
-
-
-@app.post("/environment/secrets", status_code=201)
-def create_secret(body: SecretCreate):
-    name = validate_name(body.name)
-    secret_name = SECRET_PREFIX + name
     try:
-        core_v1.read_namespaced_secret(secret_name, NAMESPACE)
-        raise HTTPException(status_code=409, detail=f"secret '{name}' already exists")
+        plain = base64.b64decode(body.valueBase64, validate=True).decode()
+    except Exception:
+        raise HTTPException(status_code=400, detail="valueBase64 is not valid base64")
+
+    annotations = {
+        DESC_ANNOTATION: body.description or "",
+        EXPRESSION_TYPE_ANNOTATION: body.expressionType or "string",
+        UPDATED_ANNOTATION: now(),
+    }
+
+    try:
+        existing = core_v1.read_namespaced_config_map(cm_name, NAMESPACE)
+        existing.data = {"value": plain}
+        existing.metadata.annotations = {**(existing.metadata.annotations or {}), **annotations}
+        core_v1.replace_namespaced_config_map(cm_name, NAMESPACE, existing)
+        response.status_code = 200
     except ApiException as e:
         if e.status != 404:
             raise HTTPException(status_code=500, detail=str(e))
+        cm = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(
+                name=cm_name,
+                labels={MANAGED_LABEL: "true", TYPE_LABEL: "variable"},
+                annotations=annotations,
+            ),
+            data={"value": plain},
+        )
+        core_v1.create_namespaced_config_map(NAMESPACE, cm)
+        response.status_code = 201
 
-    secret = client.V1Secret(
-        metadata=client.V1ObjectMeta(
-            name=secret_name,
-            labels={MANAGED_LABEL: "true", TYPE_LABEL: "secret"},
-            annotations={
-                DESC_ANNOTATION: body.description or "",
-                UPDATED_ANNOTATION: now(),
-            },
-        ),
-        string_data={"value": body.value},
-    )
-    core_v1.create_namespaced_secret(NAMESPACE, secret)
-    return secret_to_item(core_v1.read_namespaced_secret(secret_name, NAMESPACE), reveal=True)
+    return configmap_to_variable(core_v1.read_namespaced_config_map(cm_name, NAMESPACE))
+
+
+@app.delete("/environment/variables/{esv_id}", status_code=204)
+def delete_variable(esv_id: str):
+    esv_id = validate_id(esv_id)
+    cm_name = VAR_PREFIX + esv_id
+    get_configmap_or_404(cm_name, esv_id)
+    core_v1.delete_namespaced_config_map(cm_name, NAMESPACE)
+    return None
 
 
 @app.get("/environment/secrets")
 def list_secrets():
     secrets = core_v1.list_namespaced_secret(NAMESPACE, label_selector=f"{TYPE_LABEL}=secret")
-    return {"result": [secret_to_item(s, reveal=False) for s in secrets.items]}
+    result = [secret_to_metadata(s) for s in secrets.items]
+    return {"result": result, "resultCount": len(result)}
 
 
-@app.get("/environment/secrets/{name}")
-def get_secret(name: str, showSecretValue: bool = Query(False)):
-    name = validate_name(name)
-    secret = get_secret_or_404(SECRET_PREFIX + name, name)
-    return secret_to_item(secret, reveal=showSecretValue)
+@app.get("/environment/secrets/{esv_id}")
+def get_secret(esv_id: str):
+    esv_id = validate_id(esv_id)
+    secret = get_secret_or_404(SECRET_PREFIX + esv_id, esv_id)
+    return secret_to_metadata(secret)
 
 
-@app.put("/environment/secrets/{name}")
-def update_secret(name: str, body: SecretUpdate):
-    name = validate_name(name)
-    secret_name = SECRET_PREFIX + name
-    secret = get_secret_or_404(secret_name, name)
+@app.put("/environment/secrets/{esv_id}")
+def put_secret(esv_id: str, body: SecretPut, response: Response):
+    esv_id = validate_id(esv_id)
+    secret_name = SECRET_PREFIX + esv_id
 
-    if body.value is not None:
-        secret.string_data = {"value": body.value}
+    try:
+        base64.b64decode(body.valueBase64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="valueBase64 is not valid base64")
 
-    annotations = dict(secret.metadata.annotations or {})
-    if body.description is not None:
-        annotations[DESC_ANNOTATION] = body.description
-    annotations[UPDATED_ANNOTATION] = now()
-    secret.metadata.annotations = annotations
+    annotations = {
+        DESC_ANNOTATION: body.description or "",
+        ENCODING_ANNOTATION: body.encoding or "generic",
+        USE_IN_PLACEHOLDERS_ANNOTATION: "true" if body.useInPlaceholders else "false",
+        UPDATED_ANNOTATION: now(),
+    }
+    # Kubernetes Secret.data values are themselves base64 strings, so the
+    # client-supplied valueBase64 can be stored verbatim with no re-encoding.
+    data = {"value": body.valueBase64}
 
-    core_v1.replace_namespaced_secret(secret_name, NAMESPACE, secret)
-    return secret_to_item(core_v1.read_namespaced_secret(secret_name, NAMESPACE), reveal=True)
+    try:
+        existing = core_v1.read_namespaced_secret(secret_name, NAMESPACE)
+        existing.data = data
+        existing.string_data = None
+        existing.metadata.annotations = {**(existing.metadata.annotations or {}), **annotations}
+        core_v1.replace_namespaced_secret(secret_name, NAMESPACE, existing)
+        response.status_code = 200
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(status_code=500, detail=str(e))
+        secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=secret_name,
+                labels={MANAGED_LABEL: "true", TYPE_LABEL: "secret"},
+                annotations=annotations,
+            ),
+            data=data,
+        )
+        core_v1.create_namespaced_secret(NAMESPACE, secret)
+        response.status_code = 201
+
+    return secret_to_metadata(core_v1.read_namespaced_secret(secret_name, NAMESPACE))
 
 
-@app.delete("/environment/secrets/{name}", status_code=204)
-def delete_secret(name: str):
-    name = validate_name(name)
-    secret_name = SECRET_PREFIX + name
-    get_secret_or_404(secret_name, name)
+@app.delete("/environment/secrets/{esv_id}", status_code=204)
+def delete_secret(esv_id: str):
+    esv_id = validate_id(esv_id)
+    secret_name = SECRET_PREFIX + esv_id
+    get_secret_or_404(secret_name, esv_id)
     core_v1.delete_namespaced_secret(secret_name, NAMESPACE)
     return None
 
@@ -269,13 +269,13 @@ def project_configmap(name: str, data: dict):
 def project_secret(name: str, data: dict):
     try:
         existing = core_v1.read_namespaced_secret(name, NAMESPACE)
-        existing.data = None
-        existing.string_data = data
+        existing.string_data = None
+        existing.data = data
         core_v1.replace_namespaced_secret(name, NAMESPACE, existing)
     except ApiException as e:
         if e.status != 404:
             raise HTTPException(status_code=500, detail=str(e))
-        secret = client.V1Secret(metadata=client.V1ObjectMeta(name=name), string_data=data)
+        secret = client.V1Secret(metadata=client.V1ObjectMeta(name=name), data=data)
         core_v1.create_namespaced_secret(NAMESPACE, secret)
 
 
@@ -292,17 +292,26 @@ def restart_deployment(deployment_name: str) -> bool:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/environment/apply")
-def apply_environment():
+def do_restart():
+    """
+    Real AIC has no separate 'apply' step: a PUT to /environment/{secrets,variables}/{id}
+    is durable immediately, and POST /environment/restart is what makes AM pick the new
+    values up (see tenant_config_importer.py's _restart_am_for_esv). Since AM/IDM here read
+    ESVs via envFrom rather than a live AIC-style property store, this endpoint additionally
+    re-projects every item into esv-variables/esv-secrets before triggering the restart.
+    """
     cms = core_v1.list_namespaced_config_map(NAMESPACE, label_selector=f"{TYPE_LABEL}=variable").items
     secrets = core_v1.list_namespaced_secret(NAMESPACE, label_selector=f"{TYPE_LABEL}=secret").items
 
-    var_data = {cm.metadata.name[len(VAR_PREFIX):]: (cm.data or {}).get("value", "") for cm in cms}
+    var_data = {}
+    for cm in cms:
+        plain = (cm.data or {}).get("value", "")
+        var_data[cm.metadata.name[len(VAR_PREFIX):]] = plain
 
     secret_data = {}
     for s in secrets:
-        raw = (s.data or {}).get("value")
-        secret_data[s.metadata.name[len(SECRET_PREFIX):]] = base64.b64decode(raw).decode() if raw else ""
+        raw = (s.data or {}).get("value", "")
+        secret_data[s.metadata.name[len(SECRET_PREFIX):]] = raw
 
     project_configmap(PROJECTION_CONFIGMAP_NAME, var_data)
     project_secret(PROJECTION_SECRET_NAME, secret_data)
@@ -314,3 +323,14 @@ def apply_environment():
         "secretCount": len(secret_data),
         "restarted": restarted,
     }
+
+
+@app.post("/environment/restart")
+def restart_environment():
+    return do_restart()
+
+
+@app.post("/environment/apply")
+def apply_environment():
+    """Deprecated alias of POST /environment/restart, kept for backward compatibility."""
+    return do_restart()
