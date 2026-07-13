@@ -341,7 +341,7 @@ Wrong order causes DS to initialize with an empty admin password, which cannot b
 12. Deploy AM, IDM, and admin-ui: `bin/forgeops apply -e default -n fr-platform am idm admin-ui`
 13. Deploy amster: `bin/forgeops apply -e default -n fr-platform amster`, then fix the
     `idm-resource-server` OAuth2 client secret (amster's variable substitution for it is unreliable —
-    see `.claude/commands/deploy-fbc.md` Step 10 for the full fix)
+    see `.claude/commands/deploy-mock-tenant.md` Step 10 for the full fix)
 
 **Recovery if DS initialized with empty secret:**
 ```sh
@@ -474,7 +474,7 @@ kustomize/overlay/default/ds-cts/sts.yaml                          — storageCl
 bin/tunnel                                                          — port-forwards nginx 443 for browser access
 ESV-SHIM.md                                                         — ESV shim design doc + AIC-compatible API reference
 colima.md                                                           — Colima notes (superseded by OrbStack)
-.claude/commands/deploy-fbc.md                                      — /deploy-fbc slash command
+.claude/commands/deploy-mock-tenant.md                              — /deploy-mock-tenant slash command
 .claude/settings.json                                               — allow rules for kubectl/docker/forgeops
 ```
 
@@ -482,9 +482,9 @@ colima.md                                                           — Colima n
 
 ## Claude Code Slash Command
 
-`.claude/commands/deploy-fbc.md` defines a `/deploy-fbc` slash command that automates the full deploy sequence. Requires a Claude Code restart to appear.
+`.claude/commands/deploy-mock-tenant.md` defines a `/deploy-mock-tenant` slash command that automates the full deploy sequence. Requires a Claude Code restart to appear.
 
-The command covers all 12 steps: prerequisites (cert-manager + nginx + mittwald), config-loader build, namespace, Gitea, seed, DS+secrets (with ds-set-passwords wait and recovery instructions), keystore-create, TLS cert, AM+IDM+admin-ui, amster (with idm-resource-server secret fix), and health checks.
+The command covers all 13 steps: prerequisites (cert-manager + nginx + mittwald), config-loader + esv-shim build, namespace, Gitea, seed, esv-shim, DS+secrets (with ds-set-passwords wait and recovery instructions), keystore-create, TLS cert, AM+IDM+admin-ui, amster (with idm-resource-server secret fix), FBC init container verification, and health checks.
 
 ---
 

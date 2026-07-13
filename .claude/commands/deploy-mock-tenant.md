@@ -1,4 +1,4 @@
-# /deploy-fbc
+# /deploy-mock-tenant
 
 Deploy the FBC (File Based Configuration) dev stack on OrbStack, step by step.
 
