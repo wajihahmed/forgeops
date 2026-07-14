@@ -55,12 +55,12 @@ spec:
                   - -c
                   - |
                     sleep 5
-                    gitea admin user create \
+                    su git -c 'gitea admin user create \
                       --username forgerock \
                       --password forgerock \
                       --email forgerock@localhost \
                       --admin \
-                      --must-change-password=false 2>/dev/null || true
+                      --must-change-password=false' 2>/dev/null || true
           volumeMounts:
             - name: gitea-data
               mountPath: /data

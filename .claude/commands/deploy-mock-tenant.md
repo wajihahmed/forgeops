@@ -119,6 +119,21 @@ kubectl rollout status deployment/gitea -n fr-platform --timeout=120s
 
 Confirm the pod is Running before continuing.
 
+**Known gotcha (already fixed in the manifest, but worth knowing):** Gitea's `postStart` hook runs
+as root (the pod has no `runAsUser`), but the `gitea` CLI refuses to run as root and exits with
+`Gitea is not supposed to be run as root`. The hook creates the `forgerock` admin user, so if this
+regresses, every Gitea API call returns `401 Unauthorized` and the seed job (Step 4) crash-loops
+forever with only `Creating repo customer-config in Gitea` in its logs — the failure is invisible
+because the postStart command is wrapped in `2>/dev/null || true`. The fix is to run the CLI as the
+`git` user: `su git -c 'gitea admin user create ...'`. If you ever see this symptom, check
+`kustomize/base/gitea/gitea-deployment.yaml`'s postStart command still has the `su git -c` wrapper,
+or fix it manually on a running pod with:
+```
+GITEA_POD=$(kubectl get pod -n fr-platform -l app=gitea -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n fr-platform $GITEA_POD -- su git -c \
+  'gitea admin user create --username forgerock --password forgerock --email forgerock@localhost --admin --must-change-password=false'
+```
+
 ## Step 4 — Seed the customer-config repo
 
 ```
@@ -182,7 +197,16 @@ Wait for ds-set-passwords to complete — this MUST succeed before deploying AM/
 kubectl wait --for=condition=complete job/ds-set-passwords -n fr-platform --timeout=120s
 ```
 
-If `ds-set-passwords` fails with "Invalid Credentials", DS was initialized with an empty secret. Recovery:
+If `ds-set-passwords` fails with "Invalid Credentials", DS was initialized with an empty secret.
+Recovery is the same PVC-wipe procedure below.
+
+**Other failure mode — DS binary/config version mismatch:** if `ds-cts-0`/`ds-idrepo-0` crash-loop
+instead, check `kubectl logs ds-idrepo-0 -n fr-platform`. If it shows something like
+`The PingDS binary version 'X' does not match the installed configuration version 'Y'. Please run
+upgrade before continuing`, the base images use `:latest` — if the tag moved between an earlier
+bootstrap and a later pod restart, the on-disk config (written by the old binary) no longer matches
+the newer binary now running. This isn't recoverable in place; wipe and reinitialize (safe as long
+as this is a fresh dev-stack deploy with no config worth keeping):
 ```
 kubectl delete statefulset ds-idrepo ds-cts -n fr-platform
 kubectl delete pvc -n fr-platform -l app=ds-idrepo
@@ -193,6 +217,8 @@ kubectl rollout status statefulset/ds-cts -n fr-platform --timeout=300s
 kubectl rollout status statefulset/ds-idrepo -n fr-platform --timeout=300s
 kubectl wait --for=condition=complete job/ds-set-passwords -n fr-platform --timeout=120s
 ```
+`forgeops apply` reuses the existing `ds-passwords`/`am-env-secrets`/etc. Secrets unchanged, so the
+admin passwords stay the same across the wipe.
 
 ## Step 7 — Deploy keystore-create Job
 
@@ -255,21 +281,53 @@ variable substitution does not reliably set the client secret in AM. IDM uses th
 introspect Bearer tokens; if the secret is wrong, IDM hangs for 30 seconds on every authenticated
 request and the admin-ui shows a blank page.
 
-1. Open the AM console at `https://prod.iam.example.com/am/ui-admin/`
-2. Go to **Applications → OAuth 2.0 → Clients → idm-resource-server → Core**
-3. Set **Client secret** to the value of `IDM_RS_CLIENT_SECRET` from the `amster-env-secrets`
-   Kubernetes secret:
-   ```
-   kubectl get secret amster-env-secrets -n fr-platform \
-     -o jsonpath='{.data.IDM_RS_CLIENT_SECRET}' | base64 -d
-   ```
-4. Save the client in the AM console.
+The Kubernetes secret (`amster-env-secrets` / `IDM_RS_CLIENT_SECRET`) already holds the value IDM
+expects — the fix is to push that same value into AM via the REST API (no console needed, no
+patch needed since the k8s secret is already correct):
 
-Then patch the Kubernetes secret so IDM's env var matches whatever value is now in AM:
 ```
-kubectl patch secret amster-env-secrets -n fr-platform \
-  --type='json' \
-  -p='[{"op":"replace","path":"/data/IDM_RS_CLIENT_SECRET","value":"'"$(kubectl get secret amster-env-secrets -n fr-platform -o jsonpath='{.data.IDM_RS_CLIENT_SECRET}')"'"}]'
+AM_ADMIN_PW=$(kubectl get secret am-env-secrets -n fr-platform -o jsonpath='{.data.AM_PASSWORDS_AMADMIN_CLEAR}' | base64 -d)
+IDM_RS_SECRET=$(kubectl get secret amster-env-secrets -n fr-platform -o jsonpath='{.data.IDM_RS_CLIENT_SECRET}' | base64 -d)
+
+TOKEN=$(curl -sk -X POST "https://prod.iam.example.com/am/json/realms/root/authenticate" \
+  -H "X-OpenAM-Username: amadmin" -H "X-OpenAM-Password: $AM_ADMIN_PW" \
+  -H "Content-Type: application/json" | python3 -c "import sys,json; print(json.load(sys.stdin)['tokenId'])")
+
+curl -sk "https://prod.iam.example.com/am/json/realms/root/realm-config/agents/OAuth2Client/idm-resource-server" \
+  -H "iPlanetDirectoryPro: $TOKEN" -H "Accept-API-Version: resource=1.0" > /tmp/idm-rs-client.json
+
+python3 -c "
+import json
+d = json.load(open('/tmp/idm-rs-client.json'))
+flat = {}
+for section in ['overrideOAuth2ClientConfig','advancedOAuth2ClientConfig','signEncOAuth2ClientConfig','coreOAuth2ClientConfig','coreOpenIDClientConfig','coreUmaClientConfig']:
+    flat.update(d.get(section, {}))
+flat['userpassword'] = '$IDM_RS_SECRET'
+json.dump(flat, open('/tmp/idm-rs-client-flat.json', 'w'))
+"
+
+curl -sk -X PUT "https://prod.iam.example.com/am/json/realms/root/realm-config/agents/OAuth2Client/idm-resource-server" \
+  -H "iPlanetDirectoryPro: $TOKEN" -H "Accept-API-Version: resource=1.0" \
+  -H "Content-Type: application/json" -H "If-Match: *" \
+  -d @/tmp/idm-rs-client-flat.json
+```
+
+Why the flatten step: AM's `GET` returns the client config grouped into sections
+(`coreOAuth2ClientConfig`, `advancedOAuth2ClientConfig`, etc.) but `PUT` expects a single flat
+object of attribute names — `PUT`-ing the grouped shape back fails with `Invalid attribute
+specified.` The response echoes `userpassword: null` even on success (AM never returns secret
+values) — that is not evidence of failure. Confirm the change actually took by testing auth
+(a wrong secret gives `invalid_client`; a correct secret against a grant type this client isn't
+allowed to use gives a different error, `unauthorized_client` — that's the tell that auth passed
+and only grant-type authorization stopped the request):
+```
+curl -sk -X POST "https://prod.iam.example.com/am/oauth2/access_token" \
+  -d "grant_type=client_credentials&scope=am-introspect-all-tokens" \
+  -u "idm-resource-server:$IDM_RS_SECRET"
+```
+
+Then restart IDM to pick up the (already-correct) secret from the env:
+```
 kubectl rollout restart deployment/idm -n fr-platform
 kubectl rollout status deployment/idm -n fr-platform --timeout=120s
 ```
