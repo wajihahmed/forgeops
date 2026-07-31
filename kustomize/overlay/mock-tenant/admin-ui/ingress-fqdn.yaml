@@ -1,0 +1,20 @@
+- op: replace
+  path: /spec/rules/0/host
+  value: mock.iam.example.com
+- op: replace
+  path: /spec/tls/0/hosts
+  value:
+  - mock.iam.example.com
+- op: replace
+  path: /spec/tls/0/secretName
+  value: platform-tls
+- op: add
+  path: /spec/rules/0/http/paths/-
+  value:
+    path: /admin
+    pathType: Prefix
+    backend:
+      service:
+        name: admin-ui
+        port:
+          number: 8080

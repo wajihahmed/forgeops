@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ds-idrepo
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: ds
+        resources:
+          requests:
+            memory: 2Gi
+          limits:
+            memory: 2Gi
+        imagePullPolicy: IfNotPresent
+      initContainers:
+      - name: init
+        resources: {}
+        imagePullPolicy: IfNotPresent
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      annotations:
+        pv.beta.kubernetes.io/gid: '0'
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+      storageClassName: local-path

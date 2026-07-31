@@ -1,0 +1,20 @@
+FROM ds:local-base
+
+# Replace upstream runtime-scripts with mock-tenant versions (saas indexes, virtual
+# attributes, unique-attribute plugins, unindexed-search privilege, CTS durability).
+COPY --chown=forgerock:root runtime-scripts-mock-tenant/ /opt/opendj/runtime-scripts/
+
+# Re-stage mock-tenant-orgs.ldif so mock-tenant-config.sh can append it to the
+# identity-store profile. ds-setup.sh deletes ldif-ext/ so it must be re-copied here.
+# mock-tenant-orgs.ldif supersedes orgs.ldif entirely — no need to re-stage orgs.ldif.
+COPY --chown=forgerock:root ldif-ext/identities/mock-tenant-orgs.ldif /opt/opendj/ldif-ext/identities/mock-tenant-orgs.ldif
+
+# Stage 99-fraas-schema.ldif separately so the ds-idrepo/setup script can copy it into
+# db/schema/ AFTER the idm-repo setup-profile has run and defined fr-idm-uuid.
+# It must NOT be in config/schema/ (where the base Dockerfile puts custom-schema/) because
+# that path is processed before setup-profiles run, causing a schema validation failure.
+COPY --chown=forgerock:root config/schema-mock-tenant/99-fraas-schema.ldif /opt/opendj/mock-tenant-schema/99-fraas-schema.ldif
+
+# Relax DS security settings and append mock-tenant LDAP OUs to identity-store profile.
+RUN ./mock-tenant-config.sh && rm ./mock-tenant-config.sh
+RUN ./saas-compat-config.sh && rm ./saas-compat-config.sh

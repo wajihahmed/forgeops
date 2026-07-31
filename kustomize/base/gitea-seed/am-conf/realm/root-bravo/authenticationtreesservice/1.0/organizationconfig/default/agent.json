@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "realm": "/bravo",
+    "entityType": "authenticationTreesService",
+    "entityId": "default/Agent",
+    "uid": "ou=Agent,ou=default,ou=OrganizationConfig,ou=1.0,ou=authenticationTreesService,ou=services,o=bravo,ou=services,ou=am-config",
+    "sunServiceID": "tree",
+    "objectClass": [
+      "top",
+      "sunServiceComponent"
+    ],
+    "pathParams": {},
+    "ou": [
+      "Agent"
+    ]
+  },
+  "data": {
+    "nodes": {
+      "7a910023-cad2-4f49-9ce0-1a0c711613d3": {
+        "displayName": "Agent Data Store Decision",
+        "nodeType": "AgentDataStoreDecisionNode",
+        "connections": {
+          "true": "70e691a5-1e33-4ac3-a356-e7b6d60d92e0",
+          "false": "e301438c-0bd0-429c-ab0c-66126501069a"
+        },
+        "x": 700,
+        "y": 25
+      },
+      "35cb0861-c160-47ff-808c-3429ba18772c": {
+        "displayName": "Page Node",
+        "nodeType": "PageNode",
+        "connections": {
+          "outcome": "7a910023-cad2-4f49-9ce0-1a0c711613d3"
+        },
+        "x": 350,
+        "y": 200
+      },
+      "6c24a892-4bae-48ad-8d9c-8061257c9ed7": {
+        "displayName": "Zero Page Login Collector",
+        "nodeType": "ZeroPageLoginNode",
+        "connections": {
+          "true": "7a910023-cad2-4f49-9ce0-1a0c711613d3",
+          "false": "35cb0861-c160-47ff-808c-3429ba18772c"
+        },
+        "x": 150,
+        "y": 25
+      }
+    },
+    "staticNodes": {
+      "startNode": {
+        "x": 50,
+        "y": 25
+      },
+      "70e691a5-1e33-4ac3-a356-e7b6d60d92e0": {
+        "x": 1000,
+        "y": 25
+      },
+      "e301438c-0bd0-429c-ab0c-66126501069a": {
+        "x": 1000,
+        "y": 200
+      }
+    },
+    "entryNodeId": "6c24a892-4bae-48ad-8d9c-8061257c9ed7",
+    "_type": {
+      "_id": "authenticationTreesService",
+      "name": "authenticationTreesService",
+      "collection": false
+    },
+    "description": "Authentication Tree for Agent",
+    "uiConfig": {
+      "categories": "[\"Authentication\"]"
+    },
+    "_id": "default/Agent"
+  }
+}

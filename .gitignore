@@ -45,5 +45,8 @@ pyenv.cfg
 *.swp
 *.swo
 *~
-lib/dependencies
+lib/dependencies/
 .polaris/
+fbc/
+.claude/settings*.json
+env.log

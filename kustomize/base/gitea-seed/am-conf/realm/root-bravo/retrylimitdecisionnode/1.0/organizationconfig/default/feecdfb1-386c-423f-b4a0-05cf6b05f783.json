@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "realm": "/bravo",
+    "entityType": "RetryLimitDecisionNode",
+    "entityId": "default/feecdfb1-386c-423f-b4a0-05cf6b05f783",
+    "uid": "ou=feecdfb1-386c-423f-b4a0-05cf6b05f783,ou=default,ou=OrganizationConfig,ou=1.0,ou=RetryLimitDecisionNode,ou=services,o=bravo,ou=services,ou=am-config",
+    "sunServiceID": "instance",
+    "objectClass": [
+      "top",
+      "sunServiceComponent"
+    ],
+    "pathParams": {},
+    "ou": null
+  },
+  "data": {
+    "incrementUserAttributeOnFailure": true,
+    "retryLimit": 5,
+    "_type": {
+      "_id": "RetryLimitDecisionNode",
+      "name": "RetryLimitDecisionNode",
+      "collection": false
+    },
+    "_id": "default/feecdfb1-386c-423f-b4a0-05cf6b05f783"
+  }
+}

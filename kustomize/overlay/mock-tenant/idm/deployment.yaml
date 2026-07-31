@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      containers:
+      - name: openidm
+        resources: {}
+        envFrom:
+        - configMapRef:
+            name: idm
+        - configMapRef:
+            name: esv-variables
+            optional: true
+        - secretRef:
+            name: esv-secrets
+            optional: true
+        imagePullPolicy: Always
+      initContainers:
+      - name: custom-vol-init
+        image: config-loader:local
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: GIT_URL
+          value: "http://gitea.fr-platform.svc.cluster.local:3000/forgerock/customer-config.git"
+        - name: GIT_PATH
+          value: "/tmp/customer-config"
+        - name: CONFIG_SRC_PATH
+          value: "idm"
+        - name: DESTINATION_PATH
+          value: "/custom/config"
+        - name: CONFIG_LOAD_STRATEGY
+          value: "JSON_REPLACE"
+        - name: BRANCH
+          value: "master"
+        command: ["clone-and-copy"]
+        volumeMounts:
+        - mountPath: /custom
+          name: custom
+        resources: {}
+      - name: filesystem-init
+        resources: {}
+        imagePullPolicy: Always
+      - name: truststore-init
+        resources: {}

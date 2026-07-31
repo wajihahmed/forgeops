@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "realm": "/bravo",
+    "entityType": "AccountLockoutNode",
+    "entityId": "default/76b5e15c-493c-47dc-b813-01cbc74c5a85",
+    "uid": "ou=76b5e15c-493c-47dc-b813-01cbc74c5a85,ou=default,ou=OrganizationConfig,ou=1.0,ou=AccountLockoutNode,ou=services,o=bravo,ou=services,ou=am-config",
+    "sunServiceID": "instance",
+    "objectClass": [
+      "top",
+      "sunServiceComponent"
+    ],
+    "pathParams": {},
+    "ou": null
+  },
+  "data": {
+    "lockAction": "LOCK",
+    "_type": {
+      "_id": "AccountLockoutNode",
+      "name": "AccountLockoutNode",
+      "collection": false
+    },
+    "_id": "default/76b5e15c-493c-47dc-b813-01cbc74c5a85"
+  }
+}

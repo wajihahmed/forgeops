@@ -1,0 +1,126 @@
+# This file intentionally supersedes ldif-ext/identities/orgs.ldif entirely.
+# It contains the full realm hierarchy from orgs.ldif PLUS the AIC-parity OUs
+# (ou=user, ou=organization, ou=application, ou=svcaccts) required by the mock-tenant stack.
+#
+# It is appended to the am-identity-store base-entries.ldif by mock-tenant-config.sh.
+# orgs.ldif is NOT appended separately (the two-file glob in ds-setup.sh silently skips
+# both files anyway).
+#
+# If upstream orgs.ldif gains new entries, they must be added here too.
+# Note: upstream orgs.ldif has a typo — ou=usermeta,o=alpha has "ou: alpha" as RDN value;
+# this file uses the correct value "ou: usermeta".
+
+dn: o=root,ou=identities
+objectClass: top
+objectClass: organization
+o: root
+
+dn: ou=groups,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: groups
+
+dn: ou=people,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=teammembermeta,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: teammembermeta
+
+dn: ou=svcaccts,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: svcaccts
+
+dn: o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organization
+o: alpha
+
+dn: ou=groups,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: groups
+
+dn: ou=people,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=role,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: role
+
+dn: ou=assignment,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: assignment
+
+dn: ou=usermeta,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: usermeta
+
+dn: ou=user,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: user
+
+dn: ou=organization,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: organization
+
+dn: ou=application,o=alpha,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: application
+
+dn: o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organization
+o: bravo
+
+dn: ou=groups,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: groups
+
+dn: ou=people,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=role,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: role
+
+dn: ou=assignment,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: assignment
+
+dn: ou=usermeta,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: usermeta
+
+dn: ou=user,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: user
+
+dn: ou=organization,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: organization
+
+dn: ou=application,o=bravo,o=root,ou=identities
+objectClass: top
+objectClass: organizationalUnit
+ou: application

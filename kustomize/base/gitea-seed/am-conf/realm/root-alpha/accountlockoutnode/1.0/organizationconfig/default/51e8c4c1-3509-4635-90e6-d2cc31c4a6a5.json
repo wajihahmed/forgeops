@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "realm": "/alpha",
+    "entityType": "AccountLockoutNode",
+    "entityId": "default/51e8c4c1-3509-4635-90e6-d2cc31c4a6a5",
+    "uid": "ou=51e8c4c1-3509-4635-90e6-d2cc31c4a6a5,ou=default,ou=OrganizationConfig,ou=1.0,ou=AccountLockoutNode,ou=services,o=alpha,ou=services,ou=am-config",
+    "sunServiceID": "instance",
+    "objectClass": [
+      "top",
+      "sunServiceComponent"
+    ],
+    "pathParams": {},
+    "ou": null
+  },
+  "data": {
+    "lockAction": "LOCK",
+    "_type": {
+      "_id": "AccountLockoutNode",
+      "name": "AccountLockoutNode",
+      "collection": false
+    },
+    "_id": "default/51e8c4c1-3509-4635-90e6-d2cc31c4a6a5"
+  }
+}

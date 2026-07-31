@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+#
+# Default setup script
+# Setup the directory server for the identity store, idm repo and config backends.
+
+# This uses PingDS setup profiles. If the schema for a profile has not been
+# changed it may use an older version. For example, PingAM 7.5 still uses the 6.5 schema for configuration
+set -e
+
+CONFIG="am-config:6.5"
+AM_IDENTITY_STORE="am-identity-store"
+IDM_REPO="idm-repo"
+DS_PROXIED_SERVER="ds-proxied-server:7.1"
+
+setup-profile --profile ${CONFIG} \
+                  --set am-config/amConfigAdminPassword:password \
+ && setup-profile --profile ${AM_IDENTITY_STORE} \
+                  --set am-identity-store/amIdentityStoreAdminPassword:password \
+ && setup-profile  --profile ${IDM_REPO} \
+                  --set idm-repo/domain:forgerock.io \
+ && setup-profile --profile ${DS_PROXIED_SERVER} \
+                  --set ds-proxied-server/proxyUserDn:uid=proxy \
+                  --set ds-proxied-server/proxyUserCertificateSubjectDn:CN=ds,O=ForgeRock.com
+
+# Copy custom schema files into db after setup-profiles have been imported.
+# 99-fraas-schema.ldif is staged separately (not in custom-schema/) so it is copied here
+# after idm-repo setup-profile has run and defined fr-idm-uuid (required by fr-id-cloud-svc-acct).
+cp -a /opt/opendj/custom-schema/*.ldif /opt/opendj/data/db/schema
+cp /opt/opendj/mock-tenant-schema/99-fraas-schema.ldif /opt/opendj/data/db/schema/
+rm -rf /opt/opendj/custom-schema /opt/opendj/mock-tenant-schema
+
+# The default in 7.x is to use PBKDF2 password hashing - which is many order of magnitude slower than
+# SHA-512. We recommend leaving PBKDF2 as the default as it more secure.
+# If you wish to revert to the less secure SHA-512, Uncomment these lines:
+#dsconfig --offline --no-prompt --batch <<EOF
+##    set-password-storage-scheme-prop --scheme-name "Salted SHA-512" --set enabled:true
+##    set-password-policy-prop --policy-name "Default Password Policy" --set default-password-storage-scheme:"Salted SHA-512"
+#EOF
+
+# Indexes for the combined PingAM/PingIDM repo, aligned with saas dsconfig-input.
+# Matching rules: .7 = caseIgnoreJsonQueryMatch, .8 = caseIgnoreJsonQueryMatchIndexer
+dsconfig --offline --no-prompt --batch <<EOF
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --type generic \
+        --index-name fr-idm-uuid
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-effectiveApplications
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-effectiveGroup
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:presence \
+        --index-name fr-idm-lastSync
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-equality \
+        --index-name fr-idm-json
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-equality \
+        --index-name fr-idm-managed-assignment-json
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:presence \
+        --index-name fr-idm-assignment-condition
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-agent-id
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-oauth2-client-id
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-resourcedata
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-subject-id
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-managed-application-json
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-idm-managed-application-name
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-user-manager \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:extensible \
+        --index-name fr-idm-managed-user-meta \
+        --set index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:extensible \
+        --index-name fr-idm-managed-user-notifications \
+        --set index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-user-roles \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-user-authzroles-internal-role \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-user-authzroles-managed-role \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-organization-parent \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-organization-owner \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-organization-admin \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-organization-member \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-role-assignments \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-assignment-member \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-application-member \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-application-owner \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-user-groups \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-user-task-principals \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-1 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-2 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-3 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-4 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-5 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-6 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-8 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-9 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-reference-10 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-managed-role-applications \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-owners-reference \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-agent-reference \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-resource-reference \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-subject-reference \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:big-extensible \
+        --index-name fr-idm-subjectgroup-reference \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.7 \
+        --set big-index-extensible-matching-rule:1.3.6.1.4.1.36733.2.1.4.8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:ordering \
+        --type generic \
+        --index-name fr-idm-managed-user-active-date
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:ordering \
+        --type generic \
+        --index-name fr-idm-managed-user-inactive-date
+create-backend-vlv-index \
+        --backend-name amIdentityStore \
+        --index-name managed-group-by-cn \
+        --set base-dn:ou=groups,ou=identities \
+        --set sort-order:+cn \
+        --set scope:single-level \
+        --set filter:(&(objectClass=fr-idm-managed-group)(objectClass=groupOfURLs))
+create-backend-vlv-index \
+        --backend-name amIdentityStore \
+        --index-name managed-user-by-id \
+        --set base-dn:ou=people,ou=identities \
+        --set sort-order:+fr-idm-uuid \
+        --set scope:single-level \
+        --set filter:(&(objectClass=devicePrintProfilesContainer)(objectClass=forgerock-am-dashboard-service)(objectClass=fr-idm-managed-user-explicit)(objectClass=fr-idm-managed-user-hybrid-obj)(objectClass=iPlanetPreferences)(objectClass=inetOrgPerson)(objectClass=inetuser)(objectClass=iplanet-am-auth-configuration-service)(objectClass=iplanet-am-managed-person)(objectClass=iplanet-am-user-service)(objectClass=kbaInfoContainer)(objectClass=oathDeviceProfilesContainer)(objectClass=pushDeviceProfilesContainer)(objectClass=sunAMAuthAccountLockout)(objectClass=sunFMSAML2NameIdentifier)(objectClass=webauthnDeviceProfilesContainer))
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr1
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr2
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr3
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr4
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr5
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr6
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr7
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr8
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr9
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr10
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr11
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr12
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr13
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr14
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr15
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr16
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr17
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr18
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr19
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-istr20
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-imulti1
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-imulti2
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-imulti3
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-imulti4
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-imulti5
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-idate1
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-idate2
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-idate3
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-idate4
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-idate5
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-iint1
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-iint2
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-iint3
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-iint4
+create-backend-index \
+        --backend-name amIdentityStore \
+        --set index-type:equality \
+        --index-name fr-attr-iint5
+set-backend-index-prop \
+        --backend-name idmRepo \
+        --add index-type:big-equality \
+        --index-name fr-idm-syncqueue-mapping
+set-backend-index-prop \
+        --backend-name idmRepo \
+        --add index-type:big-equality \
+        --index-name fr-idm-syncqueue-state
+set-backend-prop \
+        --backend-name cfgStore \
+        --set index-entry-limit:20000
+create-backend-index \
+        --backend-name cfgStore \
+        --index-name sunKeyValue \
+        --set index-type:equality
+create-backend-index \
+        --backend-name cfgStore \
+        --index-name sunserviceID \
+        --set index-type:big-equality
+EOF
+
+# Virtual attributes — compute memberURL dynamically from fr-idm-effectiveGroup
+dsconfig --offline --no-prompt --batch <<EOF
+create-virtual-attribute \
+        --name "virtual root group memberURL" \
+        --type user-template \
+        --set base-dn:ou=groups,o=root,ou=identities \
+        --set enabled:true \
+        --set attribute-type:memberURL \
+        --set template:"ldap:///ou=people,o=root,ou=identities??sub?fr-idm-effectiveGroup:caseIgnoreJsonQueryMatch:=_refResourceId eq \"{cn}\"" \
+        --set conflict-behavior:merge-real-and-virtual \
+        --set filter:(&(objectClass=top)(objectClass=groupOfURLs)(objectClass=fr-idm-managed-group))
+create-virtual-attribute \
+        --name "virtual alpha group memberURL" \
+        --type user-template \
+        --set base-dn:ou=groups,o=alpha,o=root,ou=identities \
+        --set enabled:true \
+        --set attribute-type:memberURL \
+        --set template:"ldap:///ou=user,o=alpha,o=root,ou=identities??sub?fr-idm-effectiveGroup:caseIgnoreJsonQueryMatch:=_refResourceId eq \"{cn}\"" \
+        --set conflict-behavior:virtual-overrides-real \
+        --set filter:(&(objectClass=top)(objectClass=groupOfURLs)(objectClass=fr-idm-managed-group))
+create-virtual-attribute \
+        --name "virtual bravo group memberURL" \
+        --type user-template \
+        --set base-dn:ou=groups,o=bravo,o=root,ou=identities \
+        --set enabled:true \
+        --set attribute-type:memberURL \
+        --set template:"ldap:///ou=user,o=bravo,o=root,ou=identities??sub?fr-idm-effectiveGroup:caseIgnoreJsonQueryMatch:=_refResourceId eq \"{cn}\"" \
+        --set conflict-behavior:virtual-overrides-real \
+        --set filter:(&(objectClass=top)(objectClass=groupOfURLs)(objectClass=fr-idm-managed-group))
+set-virtual-attribute-prop \
+        --name isMemberOf \
+        --set filter:(|(objectClass=person)(objectClass=groupOfNames)(objectClass=groupOfUniqueNames)(objectClass=groupOfEntries)(objectClass=fr-id-cloud-svc-acct))
+EOF
+
+# Unique-attribute plugins — enforce uid and application name uniqueness per realm
+dsconfig --offline --no-prompt --batch <<EOF
+create-plugin \
+        --plugin-name "Alpha Username Unique Attribute" \
+        --type "unique-attribute" \
+        --set "type:uid" \
+        --set "base-dn:ou=user,o=alpha,o=root,ou=identities" \
+        --set "enabled:true"
+create-plugin \
+        --plugin-name "Bravo Username Unique Attribute" \
+        --type "unique-attribute" \
+        --set "type:uid" \
+        --set "base-dn:ou=user,o=bravo,o=root,ou=identities" \
+        --set "enabled:true"
+create-plugin \
+        --plugin-name "Alpha Application Name Unique Attribute" \
+        --type "unique-attribute" \
+        --set "type:fr-idm-managed-application-name" \
+        --set "base-dn:ou=application,o=alpha,o=root,ou=identities" \
+        --set "enabled:true"
+create-plugin \
+        --plugin-name "Bravo Application Name Unique Attribute" \
+        --type "unique-attribute" \
+        --set "type:fr-idm-managed-application-name" \
+        --set "base-dn:ou=application,o=bravo,o=root,ou=identities" \
+        --set "enabled:true"
+EOF
+
+echo "Done."

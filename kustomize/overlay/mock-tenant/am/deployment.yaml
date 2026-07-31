@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: am
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      containers:
+      - name: openam
+        resources: {}
+        env:
+        - name: CATALINA_USER_OPTS
+          value: -Dam.server.protocol=https -Dam.server.fqdn=mock.iam.example.com
+            -Dam.server.port=443
+        - name: FBC_BASE_PATHS
+          value: "-Dcom.forgerock.am.fileconfig.basepaths=/home/forgerock/base/config/services,/home/forgerock/openam/config/services"
+        envFrom:
+        - secretRef:
+            name: am-env-secrets
+        - configMapRef:
+            name: platform-config
+        - secretRef:
+            name: ds-env-secrets
+        - configMapRef:
+            name: esv-variables
+            optional: true
+        - secretRef:
+            name: esv-secrets
+            optional: true
+        imagePullPolicy: Always
+        lifecycle:
+          postStart:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  for i in $(seq 1 60); do
+                    curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/am/json/health/live 2>/dev/null | grep -q '^200$' && break
+                    sleep 5
+                  done
+                  TOKEN=$(curl -s -X POST "http://localhost:8080/am/json/realms/root/authenticate" \
+                    -H "Host: mock.iam.example.com" \
+                    -H "X-OpenAM-Username: amadmin" -H "X-OpenAM-Password: $AM_PASSWORDS_AMADMIN_CLEAR" \
+                    -H "Content-Type: application/json" | sed -n 's/.*"tokenId":"\([^"]*\)".*/\1/p')
+                  REALMS_JSON=$(curl -s "http://localhost:8080/am/json/global-config/realms/?_queryFilter=true" \
+                    -H "Host: mock.iam.example.com" \
+                    -H "iPlanetDirectoryPro: $TOKEN" -H "Accept-API-Version: resource=1.0")
+                  for REALM in alpha bravo; do
+                    if ! echo "$REALMS_JSON" | grep -q "\"name\":\"$REALM\""; then
+                      curl -s -X POST "http://localhost:8080/am/json/global-config/realms/?_action=create" \
+                        -H "Host: mock.iam.example.com" \
+                        -H "iPlanetDirectoryPro: $TOKEN" -H "Accept-API-Version: resource=1.0" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"name\": \"$REALM\", \"parentPath\": \"/\", \"active\": true, \"aliases\": []}" >/dev/null 2>&1
+                    fi
+                  done
+      initContainers:
+      - name: custom-vol-init
+        image: config-loader:local
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: GIT_URL
+          value: "http://gitea.fr-platform.svc.cluster.local:3000/forgerock/customer-config.git"
+        - name: GIT_PATH
+          value: "/tmp/customer-config"
+        - name: CONFIG_SRC_PATH
+          value: "am/services"
+        - name: DESTINATION_PATH
+          value: "/custom/config/services"
+        - name: CONFIG_LOAD_STRATEGY
+          value: "JSON_MERGE"
+        - name: BRANCH
+          value: "master"
+        command: ["clone-and-copy"]
+        volumeMounts:
+        - mountPath: /custom
+          name: custom
+        resources: {}
+      - name: filesystem-init
+        resources: {}
+        imagePullPolicy: Always
+      - name: truststore-init
+        resources: {}

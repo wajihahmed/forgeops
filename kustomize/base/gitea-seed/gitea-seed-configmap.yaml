@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-seed-scripts
+data:
+  seed.sh: |
+    #!/bin/sh
+    set -e
+
+    # Check if repo already exists — skip seeding if so
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+      -u "$GITEA_USER:$GITEA_PASSWORD" \
+      "$GITEA_URL/api/v1/repos/$GITEA_USER/$REPO_NAME")
+    if [ "$STATUS" = "200" ]; then
+      echo "Repo $REPO_NAME already exists, skipping seed"
+      exit 0
+    fi
+
+    echo "Creating repo $REPO_NAME in Gitea"
+    curl -s -f --max-time 10 -u "$GITEA_USER:$GITEA_PASSWORD" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"'"$REPO_NAME"'","private":false,"auto_init":false}' \
+      "$GITEA_URL/api/v1/user/repos"
+
+    WORK_DIR=$(mktemp -d)
+    cd "$WORK_DIR"
+    git init
+    git config user.email "seed@localhost"
+    git config user.name "Seed Job"
+
+    # AM datastore config — overrides the image default (forgeops uses ou=people,
+    # AIC uses ou=user,o={realm},o=root,ou=identities which matches our DS tree).
+    DS_PATH="sunidentityrepositoryservice/1.0/organizationconfig/default"
+    mkdir -p "am/services/realm/root-alpha/$DS_PATH"
+    mkdir -p "am/services/realm/root-bravo/$DS_PATH"
+    cp /am-conf/alpha-opendj.json "am/services/realm/root-alpha/$DS_PATH/opendj.json"
+    cp /am-conf/bravo-opendj.json "am/services/realm/root-bravo/$DS_PATH/opendj.json"
+
+    # IDM conf files — only managed.json and repo.ds.json are seeded here so
+    # AM/IDM can start. All other config is pushed via push-config after deploy.
+    mkdir -p idm/conf
+    cp /idm-conf/managed.json  idm/conf/managed.json
+    cp /idm-conf/repo.ds.json  idm/conf/repo.ds.json
+
+    git add .
+    git commit -m "Initial customer-config scaffold"
+    git remote add origin \
+      "http://$GITEA_USER:$GITEA_PASSWORD@gitea:3000/$GITEA_USER/$REPO_NAME.git"
+    git push -u origin master
+    echo "Seeding complete"

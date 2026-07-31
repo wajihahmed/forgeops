@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -e
+
+# Grant unindexed-search privilege to am-identity-bind-account so AM can browse
+# ou=identities without hitting "Insufficient Access Rights: unindexed search".
+# AIC production avoids this because it has full saas indexes; we don't.
+ldapmodify --hostname localhost --port 1389 \
+    --bindDN "uid=admin" --bindPasswordFile "${DS_UID_ADMIN_PASSWORD_FILE}" \
+    --trustAll <<'LDIF' || true
+dn: uid=am-identity-bind-account,ou=admins,ou=identities
+changetype: modify
+add: ds-privilege-name
+ds-privilege-name: unindexed-search
+LDIF
+
+echo "post-init done."
+
+exit 0
+
+## Below is a sample of a user supplied add-index script int the configMap
+
+# This can be done offline...
+dsconfig --offline --no-prompt --batch <<EOF
+create-backend-index \
+          --backend-name amIdentityStore \
+          --set index-type:equality \
+          --index-name carLicense
+EOF
+
+rebuild-index  --offline \
+ --baseDN ou=identities \
+ --index carLicense
+
+# Sample commands that can be done online.
+
+dsconfig --hostname localhost --port 4444 \
+    --bindDN uid=admin --bindPassword:file $DS_UID_ADMIN_PASSWORD_FILE \
+    --trustAll  --no-prompt --batch <<EOF
+create-backend-index \
+          --backend-name amIdentityStore \
+          --set index-type:equality \
+          --index-name carLicense
+EOF
+
+
+rebuild-index --hostname localhost --port 4444 \
+    --bindDN uid=admin ---bindPassword:file $DS_UID_ADMIN_PASSWORD_FILE \
+    --trustAll   \
+    --baseDN ou=identities \
+    --index carLicense

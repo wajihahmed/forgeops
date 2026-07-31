@@ -1,0 +1,14 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: amster
+spec:
+  template:
+    spec:
+      volumes:
+      - name: amster-secrets
+        secret:
+          secretName: amster
+          items:
+          - key: ssh-privatekey
+            path: id_rsa

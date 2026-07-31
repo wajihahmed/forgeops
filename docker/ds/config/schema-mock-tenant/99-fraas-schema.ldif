@@ -1,0 +1,522 @@
+#
+# Copyright 2020 ForgeRock AS. All Rights Reserved
+#
+# Use of this code requires a commercial software license with ForgeRock AS.
+# or with one of its affiliates. All use shall be exclusively subject
+# to such license between the licensee and ForgeRock AS.
+#
+# FRaaS PENDING OID 1.3.6.1.4.1.36733.2.4
+#   AttributeTypes  1.3.6.1.4.1.36733.2.4.1
+#   ObjectClasses   1.3.6.1.4.1.36733.2.4.2
+#   Syntaxes        1.3.6.1.4.1.36733.2.4.3
+#   Matching Rules  1.3.6.1.4.1.36733.2.4.4
+#
+# Register new OIDs in the FRaaS OID registry: docs/user-schema/index.md
+#
+dn: cn=schema
+objectClass: top
+objectClass: ldapSubentry
+objectClass: subschema
+attributeTypes: ( 1.3.6.1.4.1.36733.2.4.1.142 NAME 'fr-idm-inviteDate'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  SINGLE-VALUE
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: ( 1.3.6.1.4.1.36733.2.4.1.143 NAME 'fr-idm-jurisdiction'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  SINGLE-VALUE
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: ( 1.3.6.1.4.1.36733.2.4.1.144 NAME 'fr-idm-onboardDate'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  SINGLE-VALUE
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: ( 1.3.6.1.4.1.36733.2.4.1.188 NAME 'fr-attr-group'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: ( 1.3.6.1.4.1.36733.2.4.1.204 NAME 'fr-idm-inviteOTPCount'
+  DESC 'Positive integer used to count the number of OTP invites sent, and reject further attempts when it goes over a threshold'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  SINGLE-VALUE
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+objectClasses: ( 1.3.6.1.4.1.36733.2.4.2.1 NAME 'fraas-admin'
+    SUP top
+    AUXILIARY
+    MAY ( inetUserStatus $
+          fr-idm-inviteDate $
+          fr-idm-inviteOTPCount $
+          fr-idm-jurisdiction $
+          fr-idm-onboardDate $
+          fr-attr-group )
+    X-STABILITY 'Internal'
+    X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.145 NAME 'fr-attr-istr1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.146 NAME 'fr-attr-istr2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.147 NAME 'fr-attr-istr3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.148 NAME 'fr-attr-istr4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.149 NAME 'fr-attr-istr5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.189 NAME 'fr-attr-istr6'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.190 NAME 'fr-attr-istr7'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.191 NAME 'fr-attr-istr8'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.192 NAME 'fr-attr-istr9'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.193 NAME 'fr-attr-istr10'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.194 NAME 'fr-attr-istr11'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.195 NAME 'fr-attr-istr12'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.196 NAME 'fr-attr-istr13'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.197 NAME 'fr-attr-istr14'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.198 NAME 'fr-attr-istr15'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.199 NAME 'fr-attr-istr16'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.200 NAME 'fr-attr-istr17'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.201 NAME 'fr-attr-istr18'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.202 NAME 'fr-attr-istr19'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.203 NAME 'fr-attr-istr20'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.150 NAME 'fr-attr-imulti1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.151 NAME 'fr-attr-imulti2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.152 NAME 'fr-attr-imulti3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.153 NAME 'fr-attr-imulti4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.154 NAME 'fr-attr-imulti5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.155 NAME 'fr-attr-idate1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.156 NAME 'fr-attr-idate2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.157 NAME 'fr-attr-idate3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.158 NAME 'fr-attr-idate4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.159 NAME 'fr-attr-idate5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.160 NAME 'fr-attr-iint1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.161 NAME 'fr-attr-iint2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.162 NAME 'fr-attr-iint3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.163 NAME 'fr-attr-iint4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.164 NAME 'fr-attr-iint5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+# Unindexed - have no -i-
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.165 NAME 'fr-attr-str1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.166 NAME 'fr-attr-str2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.167 NAME 'fr-attr-str3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.168 NAME 'fr-attr-str4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.169 NAME 'fr-attr-str5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.170 NAME 'fr-attr-multi1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.171 NAME 'fr-attr-multi2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.172 NAME 'fr-attr-multi3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.173 NAME 'fr-attr-multi4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.174 NAME 'fr-attr-multi5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.175 NAME 'fr-attr-date1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.176 NAME 'fr-attr-date2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.177 NAME 'fr-attr-date3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.178 NAME 'fr-attr-date4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.179 NAME 'fr-attr-date5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.24
+  EQUALITY generalizedTimeMatch
+  ORDERING generalizedTimeOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.180 NAME 'fr-attr-int1'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.181 NAME 'fr-attr-int2'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.182 NAME 'fr-attr-int3'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.183 NAME 'fr-attr-int4'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.184 NAME 'fr-attr-int5'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+  EQUALITY integerMatch
+  ORDERING integerOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+# Additional objectclass to add to your user to get these attributes
+objectClasses: (  1.3.6.1.4.1.36733.2.4.2.3 NAME 'fr-ext-attrs'
+  SUP top
+  AUXILIARY
+  MAY ( fr-attr-istr1 $
+        fr-attr-istr2 $
+        fr-attr-istr3 $
+        fr-attr-istr4 $
+        fr-attr-istr5 $
+        fr-attr-istr6 $
+        fr-attr-istr7 $
+        fr-attr-istr8 $
+        fr-attr-istr9 $
+        fr-attr-istr10 $
+        fr-attr-istr11 $
+        fr-attr-istr12 $
+        fr-attr-istr13 $
+        fr-attr-istr14 $
+        fr-attr-istr15 $
+        fr-attr-istr16 $
+        fr-attr-istr17 $
+        fr-attr-istr18 $
+        fr-attr-istr19 $
+        fr-attr-istr20 $
+        fr-attr-str1 $
+        fr-attr-str2 $
+        fr-attr-str3 $
+        fr-attr-str4 $
+        fr-attr-str5 $
+        fr-attr-imulti1 $
+        fr-attr-imulti2 $
+        fr-attr-imulti3 $
+        fr-attr-imulti4 $
+        fr-attr-imulti5 $
+        fr-attr-multi1 $
+        fr-attr-multi2 $
+        fr-attr-multi3 $
+        fr-attr-multi4 $
+        fr-attr-multi5 $
+        fr-attr-idate1 $
+        fr-attr-idate2 $
+        fr-attr-idate3 $
+        fr-attr-idate4 $
+        fr-attr-idate5 $
+        fr-attr-date1 $
+        fr-attr-date2 $
+        fr-attr-date3 $
+        fr-attr-date4 $
+        fr-attr-date5 $
+        fr-attr-iint1 $
+        fr-attr-iint2 $
+        fr-attr-iint3 $
+        fr-attr-iint4 $
+        fr-attr-iint5 $
+        fr-attr-int1 $
+        fr-attr-int2 $
+        fr-attr-int3 $
+        fr-attr-int4 $
+        fr-attr-int5
+        )
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+# objectclass for service accounts
+objectClasses: (  1.3.6.1.4.1.36733.2.4.2.4 NAME 'fr-id-cloud-svc-acct'
+  SUP top
+  STRUCTURAL
+  MUST ( cn $
+         fr-attr-jwks $
+         fr-attr-scope $
+         fr-idm-uuid $
+         inetUserStatus
+         )
+  MAY ( fr-attr-description )
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.185 NAME 'fr-attr-jwks'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.186 NAME 'fr-attr-scope'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
+attributeTypes: (  1.3.6.1.4.1.36733.2.4.1.187 NAME 'fr-attr-description'
+  SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+  EQUALITY caseIgnoreMatch
+  ORDERING caseIgnoreOrderingMatch
+  SINGLE-VALUE
+  X-STABILITY 'Internal'
+  X-ORIGIN 'ForgeRock Identity Cloud' )
