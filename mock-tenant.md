@@ -878,6 +878,14 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 ### Deployment
 
+- **Built-in probe delays inflate deploy time** — several components have conservative probe settings inherited from the upstream ForgeOps manifests that add unnecessary wall-clock time on a local dev cluster. Not tuned yet; revisit if further deploy time reduction is needed:
+  - **AM `startupProbe`**: `failureThreshold: 40 × periodSeconds: 10` = up to 400s before Kubernetes kills the pod. In practice AM starts in ~60–90s but the probe window means `rollout status` won't clear until startup probe passes regardless.
+  - **AM `readinessProbe`**: `initialDelaySeconds: 20, periodSeconds: 10` — fine as-is.
+  - **IDM `startupProbe`**: same 400s window as AM.
+  - **IDM `readinessProbe`**: `initialDelaySeconds: 30, periodSeconds: 30` — up to **60s dead time** after IDM is actually healthy before Kubernetes marks it ready. If anything in the deploy sequence gates on IDM readiness this is the largest tunable delay.
+  - **IDM `livenessProbe`**: `initialDelaySeconds: 120` — not on the critical deploy path.
+  - **Amster `AMSTER_DURATION: 10`** — the pause container in the amster Job sleeps 10s after the import init container finishes. The deploy script waits on job completion, so this adds a trivial but avoidable 10s.
+
 - **`AM_SERVER_FQDN` alone is not enough** — must also be in `CATALINA_USER_OPTS` as `-Dam.server.fqdn=...`. The env var is consumed by the shell entrypoint but the JVM only reads system properties.
 
 - **DS admin password is permanent** — if DS starts before mittwald populates `ds-passwords`, the password is blank and cannot be changed. Wipe PVCs and redeploy (see recovery procedure in Deploy Guide).
