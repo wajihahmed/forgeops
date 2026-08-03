@@ -1082,6 +1082,12 @@ Pods that reference `gcr.io/engineeringpit/lodestar-images/...` images (e.g. IG 
 
 Option 1 is the lowest-friction path — no credential management, consistent with the existing `IfNotPresent` pattern, and can be added as a pre-deploy step to `mock-tenant.py`.
 
+### 11. Rename `esv-shim` to `tenant-shim`
+
+The service has grown beyond ESV emulation — it now also handles AM secret-store mapping endpoints (`GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}`), and is the natural place to add further AIC-specific endpoint stubs. The name `esv-shim` undersells what it does.
+
+Rename involves: `docker/esv-shim/` directory, `esv-shim:local` image tag, `kustomize/base/esv-shim/` and `kustomize/overlay/mock-tenant/esv-shim/` directories, all references in `bin/mock-tenant.py`, the `ESV Shim` section heading in `mock-tenant.md`, and the `RESTART_DEPLOYMENTS` label inside `main.py` if it references the service by name.
+
 ### 8. Research: Get `IdentityStoreDecisionNode` into ForgeOps AM
 
 `IdentityStoreDecisionNode` is AIC-only and does not exist in the ForgeOps AM image. Using it causes `IllegalArgumentException: Unsupported node type IdentityStoreDecisionNode` — see the [Known Issues section](#why-identitystoredecisionnode-cannot-be-used) for the current workaround (`DataStoreDecisionNode` + `identityResource` on the tree).
