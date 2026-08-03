@@ -41,8 +41,6 @@ spec:
               mountPath: /scripts
             - name: seed-idm-conf
               mountPath: /idm-conf
-            - name: seed-idm-script
-              mountPath: /idm-script
             - name: seed-am-conf
               mountPath: /am-conf
       volumes:
@@ -53,9 +51,6 @@ spec:
         - name: seed-idm-conf
           configMap:
             name: gitea-seed-idm-conf
-        - name: seed-idm-script
-          configMap:
-            name: gitea-seed-idm-script
         - name: seed-am-conf
           configMap:
             name: gitea-seed-am-conf

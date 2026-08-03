@@ -36,15 +36,11 @@ data:
     cp /am-conf/alpha-opendj.json "am/services/realm/root-alpha/$DS_PATH/opendj.json"
     cp /am-conf/bravo-opendj.json "am/services/realm/root-bravo/$DS_PATH/opendj.json"
 
-    # IDM conf — seed all static files so IDM has them on first boot.
+    # IDM conf files — only managed.json and repo.ds.json are seeded here so
+    # AM/IDM can start. All other config is pushed via push-config after deploy.
     mkdir -p idm/conf
     cp /idm-conf/managed.json  idm/conf/managed.json
     cp /idm-conf/repo.ds.json  idm/conf/repo.ds.json
-    cp /idm-conf/access.json   idm/conf/access.json
-
-    # IDM scripts — teammember.js is required by the teammember managed object hooks.
-    mkdir -p idm/script
-    cp /idm-script/teammember.js idm/script/teammember.js
 
     git add .
     git commit -m "Initial customer-config scaffold"
