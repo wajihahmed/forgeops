@@ -10,6 +10,10 @@ configMapGenerator:
     files:
       - idm-conf/managed.json
       - idm-conf/repo.ds.json
+      - idm-conf/access.json
+  - name: gitea-seed-idm-script
+    files:
+      - idm-script/teammember.js
   - name: gitea-seed-am-conf
     files:
       - alpha-opendj.json=am-conf/realm/root-alpha/sunidentityrepositoryservice/1.0/organizationconfig/default/opendj.json
