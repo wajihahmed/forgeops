@@ -292,8 +292,8 @@ def _step_deploy_ds_keystore_tls():
         raise SystemExit(f"One or more parallel deploy steps failed:\n" + "\n".join(str(e) for e in errors))
 
 
-def _step_apply_am_idm_uis():
-    step(7, "Apply AM, IDM, admin-ui, login-ui, end-user-ui manifests")
+def _step_deploy_am_idm_uis():
+    step(7, "Deploy AM, IDM, admin-ui, login-ui, end-user-ui")
     run(f"bin/forgeops apply -e mock-tenant -n {NAMESPACE} am idm admin-ui login-ui end-user-ui", timeout=120)
 
 
@@ -882,7 +882,7 @@ def cmd_deploy(args):
     _step_seed_customer_config()
     _step_deploy_esv_shim()
     _step_deploy_ds_keystore_tls()
-    _step_apply_am_idm_uis()
+    _step_deploy_am_idm_uis()
     _step_create_realms()
     _step_amster_and_fix_secret()
     _step_create_tenant_stubs()

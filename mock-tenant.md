@@ -961,8 +961,8 @@ Current deploy time is ~6m20s (down from 7m30s). Target: under 5 minutes. Ideas 
 **a. Parallelise DS + keystore + TLS (~60–90s)**
 `_step_deploy_ds()`, `_step_deploy_keystore()`, and `_step_deploy_tls()` are sequential but fully independent. DS dominates (~2–3 min). Running keystore and TLS concurrently with DS using Python threads or backgrounded subprocesses would recover their wall-clock time.
 
-**b. Apply AM/IDM/UI manifests earlier (~30–60s)**
-`_step_deploy_am_idm_uis()` currently runs after DS is ready. AM and IDM don't depend on DS being ready — only on secrets and image pulls. Applying their manifests immediately after the DS `apply` (while DS is still initialising) would overlap image pull and pod scheduling with DS startup.
+**b. ~~Apply AM/IDM/UI manifests earlier~~ — N/A**
+AM and IDM both connect to DS at startup and will crash-loop until DS is ready. On a local OrbStack cluster with images already cached, there is no meaningful overlap to exploit — the real wait is always the `rollout status deployment/am` gate in step 11, which is gated on DS being healthy. Not worth implementing.
 
 **c. Seed `access.json` and `teammember.js` via gitea-seed Job, eliminating the force-restart (~90s)**
 Step 14 (`push-config --force-restart`) unconditionally restarts IDM (~90s) to pick up `access.json` and `teammember.js`, which the gitea-seed Job doesn't currently seed. If both files were added to the seed Job/ConfigMap, IDM would have them on first boot and step 14 would find nothing new — the restart could be skipped when nothing changed.
