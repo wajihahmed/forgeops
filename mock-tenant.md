@@ -970,6 +970,8 @@ Step 14 (`push-config --force-restart`) unconditionally restarts IDM (~90s) to p
 - `teammember.js` doesn't exist in the base image at all — it's a hard dependency for the `teammember` managed object, which calls `require('teammember')` in its `onCreate`, `onUpdate`, and `postUpdate` hooks. Any create/update on a `teammember` object will fail with a script-not-found error if the script isn't in Gitea when IDM boots.
 - The seed Job would need to handle `idm/script/` as a second destination path alongside `idm/conf/`.
 
+**Status (2026-08-03):** Fix implemented — both files are now seeded via the gitea-seed Job (`kustomize/base/gitea-seed/`). Note: this may be reverted in the future. The original ConfigMap pattern was intentional for files that are useful to modify at runtime (updating the ConfigMap + restarting the pod is a clean operator workflow). `access.json` and `teammember.js` don't currently need runtime modification, but if that changes they should be moved back to ConfigMaps rather than kept in the gitea-seed path.
+
 **d. Remove unconditional sleep in `_step_verify_fbc()` (~4s, trivial)**
 Line 692 has `time.sleep(4)` that could be replaced with a poll loop.
 
