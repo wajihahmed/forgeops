@@ -24,7 +24,6 @@ import shutil
 import string
 import subprocess
 import tempfile
-import threading
 import time
 
 
@@ -246,54 +245,32 @@ def _step_deploy_esv_shim():
     kubectl(f"rollout status deployment/esv-shim -n {NAMESPACE} --timeout=60s", timeout=70)
 
 
-def _step_deploy_ds_keystore_tls():
-    step(6, "Deploy DS, keystore-create, and TLS (parallel)")
+def _step_deploy_ds():
+    step(6, "Deploy DS and secrets")
+    run(f"bin/forgeops apply -e mock-tenant -n {NAMESPACE} base ds-cts ds-idrepo", timeout=120)
+    kubectl(f"rollout status statefulset/ds-cts -n {NAMESPACE} --timeout=300s", timeout=310)
+    kubectl(f"rollout status statefulset/ds-idrepo -n {NAMESPACE} --timeout=300s", timeout=310)
+    kubectl(f"wait --for=condition=complete job/ds-set-passwords -n {NAMESPACE} --timeout=120s", timeout=130)
+    print("  DS and ds-set-passwords ✓")
 
-    errors = []
 
-    def deploy_ds():
-        try:
-            run(f"bin/forgeops apply -e mock-tenant -n {NAMESPACE} base ds-cts ds-idrepo", timeout=120)
-            kubectl(f"rollout status statefulset/ds-cts -n {NAMESPACE} --timeout=300s", timeout=310)
-            kubectl(f"rollout status statefulset/ds-idrepo -n {NAMESPACE} --timeout=300s", timeout=310)
-            kubectl(f"wait --for=condition=complete job/ds-set-passwords -n {NAMESPACE} --timeout=120s", timeout=130)
-            print("  DS and ds-set-passwords ✓")
-        except Exception as e:
-            errors.append(e)
+def _step_deploy_keystore():
+    step(7, "Deploy keystore-create Job")
+    kubectl("apply -k kustomize/overlay/mock-tenant/keystore-create/")
+    kubectl(f"wait --for=condition=complete job/keystore-create -n {NAMESPACE} --timeout=120s", timeout=130)
+    kubectl(f"get secret keystore -n {NAMESPACE}", capture=True)
+    print("  keystore secret ✓")
 
-    def deploy_keystore():
-        try:
-            kubectl("apply -k kustomize/overlay/mock-tenant/keystore-create/")
-            kubectl(f"wait --for=condition=complete job/keystore-create -n {NAMESPACE} --timeout=120s", timeout=130)
-            kubectl(f"get secret keystore -n {NAMESPACE}", capture=True)
-            print("  keystore secret ✓")
-        except Exception as e:
-            errors.append(e)
 
-    def deploy_tls():
-        try:
-            kubectl("apply -k kustomize/overlay/mock-tenant/tls/")
-            kubectl(f"wait --for=condition=Ready certificate/platform-tls -n {NAMESPACE} --timeout=60s", timeout=70)
-            print("  platform-tls ✓")
-        except Exception as e:
-            errors.append(e)
-
-    threads = [
-        threading.Thread(target=deploy_ds),
-        threading.Thread(target=deploy_keystore),
-        threading.Thread(target=deploy_tls),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    if errors:
-        raise SystemExit(f"One or more parallel deploy steps failed:\n" + "\n".join(str(e) for e in errors))
+def _step_deploy_tls():
+    step(8, "Issue TLS certificate")
+    kubectl("apply -k kustomize/overlay/mock-tenant/tls/")
+    kubectl(f"wait --for=condition=Ready certificate/platform-tls -n {NAMESPACE} --timeout=60s", timeout=70)
+    print("  platform-tls ✓")
 
 
 def _step_deploy_am_idm_uis():
-    step(7, "Deploy AM, IDM, admin-ui, login-ui, end-user-ui")
+    step(9, "Deploy AM, IDM, admin-ui, login-ui, end-user-ui")
     run(f"bin/forgeops apply -e mock-tenant -n {NAMESPACE} am idm admin-ui login-ui end-user-ui", timeout=120)
 
 
@@ -881,7 +858,9 @@ def cmd_deploy(args):
     _step_deploy_gitea()
     _step_seed_customer_config()
     _step_deploy_esv_shim()
-    _step_deploy_ds_keystore_tls()
+    _step_deploy_ds()
+    _step_deploy_keystore()
+    _step_deploy_tls()
     _step_deploy_am_idm_uis()
     _step_create_realms()
     _step_amster_and_fix_secret()
