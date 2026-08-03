@@ -1068,6 +1068,20 @@ Committed in `7e486a062`. All forgeops-owned base and `overlay/default` files re
 
 The IDM Admin UI at `/admin` was deprecated and removed from ForgeOps. Not fixable — use `/platform`.
 
+### 10. Permanent Fix for `gcr.io/engineeringpit` Image Pull Auth
+
+Pods that reference `gcr.io/engineeringpit/lodestar-images/...` images (e.g. IG in the `lodestar-mock-api` overlay) fail with an unauthenticated pull error because the OrbStack cluster has no GCR credentials. The current workaround is `imagePullPolicy: IfNotPresent` + a manual `docker pull` before each deploy.
+
+**Approaches to investigate:**
+
+1. **Automate the pre-pull in `mock-tenant.py`** — add a deploy step that runs `docker pull <image>` for each `gcr.io/engineeringpit` image referenced by the active overlay before applying it. Reads the image tags from the overlay's `image-defaulter/kustomization.yaml` so it stays in sync automatically.
+
+2. **`imagePullSecret` refreshed from gcloud token** — create a docker-registry secret from `gcloud auth print-access-token` and patch the `default` ServiceAccount in `lodestar-mock-api` to use it. Token expires every hour so this would need to be re-run before each deploy; could be wired into the deploy script.
+
+3. **Workload Identity / long-lived credential** — provision a GCP service account with `artifactregistry.reader` on the `engineeringpit` project, create a long-lived JSON key, and store it as a persistent `imagePullSecret` in the namespace. Would not require refreshing but involves managing a GCP credential.
+
+Option 1 is the lowest-friction path — no credential management, consistent with the existing `IfNotPresent` pattern, and can be added as a pre-deploy step to `mock-tenant.py`.
+
 ### 8. Research: Get `IdentityStoreDecisionNode` into ForgeOps AM
 
 `IdentityStoreDecisionNode` is AIC-only and does not exist in the ForgeOps AM image. Using it causes `IllegalArgumentException: Unsupported node type IdentityStoreDecisionNode` — see the [Known Issues section](#why-identitystoredecisionnode-cannot-be-used) for the current workaround (`DataStoreDecisionNode` + `identityResource` on the tree).
