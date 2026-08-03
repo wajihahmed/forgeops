@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+images:
+- name: am
+  newName: us-docker.pkg.dev/forgeops-public/images/am
+  newTag: latest
+- name: am-custom
+  newName: busybox
+  newTag: musl
+- name: amster
+  newName: us-docker.pkg.dev/forgeops-public/images/amster
+  newTag: latest
+- name: ds
+  newName: us-docker.pkg.dev/forgeops-public/images/ds
+  newTag: latest
+- name: idm
+  newName: us-docker.pkg.dev/forgeops-public/images/idm
+  newTag: latest
+- name: idm-custom
+  newName: busybox
+  newTag: musl
+- name: ig
+  newName: gcr.io/engineeringpit/lodestar-images/ig
+  newTag: lodestar-mock-api-2026.9.0-d982d470fe9a706aa2cbf9d635b04eee78ebe340
+- name: kubectl
+  newName: us-docker.pkg.dev/forgeops-public/images/kubectl
+  newTag: latest
+kind: Component
+labels:
+- includeSelectors: true
+  pairs:
+    app.kubernetes.io/part-of: identity-platform
+namespace: lodestar-mock-api

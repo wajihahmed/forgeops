@@ -21,3 +21,17 @@ spec:
                 name: esv-shim
                 port:
                   number: 8080
+          - path: /am/json/realms/root/realms/alpha/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider
+            pathType: Prefix
+            backend:
+              service:
+                name: esv-shim
+                port:
+                  number: 8080
+          - path: /am/json/realms/root/realms/bravo/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider
+            pathType: Prefix
+            backend:
+              service:
+                name: esv-shim
+                port:
+                  number: 8080

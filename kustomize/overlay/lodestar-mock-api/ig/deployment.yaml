@@ -1,0 +1,17 @@
+#Patch PingGateway
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ig
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: ig
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 200m
+            limits:
+              memory: 1Gi

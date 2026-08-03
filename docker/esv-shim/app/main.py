@@ -1,10 +1,11 @@
 import base64
 import datetime
+import json
 import os
 import re
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel
@@ -22,12 +23,15 @@ RESTART_ANNOTATION = "esv.forgeops/restarted-at"
 
 VAR_PREFIX = "esv-var-"
 SECRET_PREFIX = "esv-secret-"
+MAPPING_PREFIX = "esv-mapping-"
 PROJECTION_CONFIGMAP_NAME = "esv-variables"
 PROJECTION_SECRET_NAME = "esv-secrets"
 RESTART_DEPLOYMENTS = ["am", "idm"]
 
 # ESV ids observed in the wild look like "esv-hmac-sha256-key-2" / "esv-error-map".
 ID_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+# AM secret alias IDs look like "am.services.httpclient.mtls.clientcert.wxaclientcrtmtls.secret"
+MAPPING_ID_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9._]*[a-zA-Z0-9]$")
 
 try:
     config.load_incluster_config()
@@ -334,3 +338,82 @@ def restart_environment():
 def apply_environment():
     """Deprecated alias of POST /environment/restart, kept for backward compatibility."""
     return do_restart()
+
+
+# ---------------------------------------------------------------------------
+# AM secret-store mapping endpoints
+# Intercepts PUT/GET/DELETE for:
+#   /am/json/realms/root/realms/{realm}/realm-config/secrets/stores/
+#     GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}
+# On real AIC this maps AM secret aliases to GCP Secret Manager via the
+# GoogleSecretManagerSecretStoreProvider. Here we accept and persist the
+# mapping to a ConfigMap so callers get 200 instead of a 404.
+# ---------------------------------------------------------------------------
+
+def _mapping_cm_name(realm: str, name: str) -> str:
+    """Return a valid k8s ConfigMap name for a realm+mapping pair."""
+    safe = re.sub(r"[^a-z0-9-]", "-", f"{realm}-{name}".lower())
+    return f"{MAPPING_PREFIX}{safe[:200]}"
+
+
+def _validate_mapping_name(name: str) -> str:
+    if len(name) > 200 or not MAPPING_ID_RE.match(name):
+        raise HTTPException(status_code=400, detail=f"invalid mapping name: {name!r}")
+    return name
+
+
+@app.put("/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}")
+async def put_secret_store_mapping(realm: str, name: str, request: Request, response: Response):
+    name = _validate_mapping_name(name)
+    body = await request.json()
+    body["_id"] = name
+    cm_name = _mapping_cm_name(realm, name)
+    payload = json.dumps(body)
+
+    try:
+        existing = core_v1.read_namespaced_config_map(cm_name, NAMESPACE)
+        existing.data = {"mapping": payload}
+        existing.metadata.annotations = {**(existing.metadata.annotations or {}), UPDATED_ANNOTATION: now()}
+        core_v1.replace_namespaced_config_map(cm_name, NAMESPACE, existing)
+        response.status_code = 200
+    except ApiException as e:
+        if e.status != 404:
+            raise HTTPException(status_code=500, detail=str(e))
+        cm = client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(
+                name=cm_name,
+                labels={MANAGED_LABEL: "true", TYPE_LABEL: "mapping"},
+                annotations={UPDATED_ANNOTATION: now()},
+            ),
+            data={"mapping": payload, "realm": realm, "name": name},
+        )
+        core_v1.create_namespaced_config_map(NAMESPACE, cm)
+        response.status_code = 201
+
+    return body
+
+
+@app.get("/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}")
+def get_secret_store_mapping(realm: str, name: str):
+    name = _validate_mapping_name(name)
+    cm_name = _mapping_cm_name(realm, name)
+    try:
+        cm = core_v1.read_namespaced_config_map(cm_name, NAMESPACE)
+    except ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail=f"mapping '{name}' not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    return json.loads((cm.data or {}).get("mapping", "{}"))
+
+
+@app.delete("/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}", status_code=204)
+def delete_secret_store_mapping(realm: str, name: str):
+    name = _validate_mapping_name(name)
+    cm_name = _mapping_cm_name(realm, name)
+    try:
+        core_v1.delete_namespaced_config_map(cm_name, NAMESPACE)
+    except ApiException as e:
+        if e.status == 404:
+            raise HTTPException(status_code=404, detail=f"mapping '{name}' not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    return None
