@@ -1,0 +1,24 @@
+{
+  "metadata" : {
+    "realm" : null,
+    "entityType" : "ScriptingService",
+    "entityId" : "default/LIBRARY/engineConfiguration",
+    "uid" : "ou=engineConfiguration,ou=LIBRARY,ou=default,ou=GlobalConfig,ou=1.0,ou=ScriptingService,ou=services,ou=am-config",
+    "sunServiceID" : "engineConfiguration",
+    "objectClass" : [
+      "top",
+      "sunServiceComponent"
+    ],
+    "pathParams" : { },
+    "ou" : null
+  },
+  "data" : {
+    "_type" : {
+      "_id" : "ScriptingService",
+      "name" : "ScriptingService",
+      "collection" : false
+    },
+    "_id" : "default/LIBRARY/engineConfiguration",
+    "propertyNamePrefix" : "esv."
+  }
+}

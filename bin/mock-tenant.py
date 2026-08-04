@@ -937,7 +937,7 @@ def _sync_idm_from_saas(saas_overrides_dir):
         capture=True,
     )
     idm_pod = r.stdout.strip().strip("'")
-    merge_script = os.path.join(os.path.dirname(__file__), "saas2forgeops.py")
+    merge_script = os.path.join(os.path.dirname(__file__), "gitea-seed.py")
     any_updated = False
 
     for subcommand, conf_file in _IDM_CONF_FILES:
@@ -953,7 +953,7 @@ def _sync_idm_from_saas(saas_overrides_dir):
             base_tmp = f.name
 
         r = run(
-            f"python3 {merge_script} {subcommand} {base_tmp} {saas_overrides_dir}/{conf_file}",
+            f"python3 {merge_script} merge {subcommand} {base_tmp} {saas_overrides_dir}/{conf_file}",
             capture=True,
         )
         merged = r.stdout
@@ -986,7 +986,7 @@ def _push_config(target, saas_repo_path, force_restart=False):
     """Core logic for the push-config command, also called by cmd_deploy."""
 
     if saas_repo_path:
-        merge_script = os.path.join(os.path.dirname(__file__), "saas2forgeops.py")
+        merge_script = os.path.join(os.path.dirname(__file__), "gitea-seed.py")
         if target in ("idm", "all"):
             saas_overrides_dir = os.path.join(saas_repo_path, _SAAS_IDM_OVERRIDES_SUBPATH)
             if not os.path.isdir(saas_overrides_dir):

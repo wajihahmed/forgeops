@@ -1,0 +1,6 @@
+- op: remove
+  path: /spec/template/spec/volumes/1/emptyDir
+- op: add
+  path: /spec/template/spec/volumes/1/persistentVolumeClaim
+  value:
+    claimName: am-fbc

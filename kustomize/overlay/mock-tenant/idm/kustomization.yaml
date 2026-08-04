@@ -4,8 +4,15 @@ components:
 - ../image-defaulter
 resources:
 - ../../../base/idm/secret-generator
+- idm-fbc-pvc.yaml
 patches:
 - path: deployment.yaml
+- path: fbc-pvc-patch.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: idm
 - path: ingress-fqdn.yaml
   target:
     group: networking.k8s.io

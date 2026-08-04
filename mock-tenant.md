@@ -31,7 +31,7 @@ This is a fork of [ForgeOps](https://github.com/ForgeRock/forgeops) — the open
 - **ESV shim**: A FastAPI service that emulates AIC's Environment Secrets & Variables REST API, enabling unmodified lodestar tooling to configure the local tenant.
 - **SaaS-compatible DS**: Custom schema, indexes, and security settings sourced from the production saas repo.
 - **`mock-tenant.py`**: A single automation script (`bin/mock-tenant.py`) with three subcommands: `bootstrap` installs cluster-wide prerequisites (once per OrbStack instance); `deploy` deploys the application stack (AM, IDM, DS, Gitea, ESV shim); `push-config` pushes updated config to Gitea and restarts the relevant pod.
-- **`saas2forgeops.py`**: A utility script (`bin/saas2forgeops.py`) with two roles: (1) `am-mirror` — mirrors the live AM root realm's tree/node config into Gitea-ready FBC files for the alpha/bravo realms; (2) `managed`/`repo-ds`/`access` subcommands — merges IDM config files from the saas repo into the ForgeOps-compatible static files committed under `kustomize/base/gitea-seed/idm-conf/`.
+- **`gitea-seed.py`**: A utility script (`bin/gitea-seed.py`) with two roles: (1) `am-mirror` — mirrors the live AM root realm's tree/node config into Gitea-ready FBC files for the alpha/bravo realms; (2) `merge <managed|repo-ds|access>` subcommands — merges IDM config files from the saas repo into the ForgeOps-compatible static files committed under `kustomize/base/gitea-seed/idm-conf/`.
 - **`tunnel`**: A helper script (`bin/tunnel`) that port-forwards the nginx ingress controller's port 443 to localhost:443 (requires `sudo`), enabling browser access to `https://mock.iam.example.com` from your laptop/desktop.
 
 **Why ForgeOps instead of the saas repo:**
@@ -337,11 +337,11 @@ python3 bin/mock-tenant.py push-config --target idm
 python3 bin/mock-tenant.py push-config --saasrepo-path /path/to/saas
 ```
 
-The `--saasrepo-path` option re-runs `bin/merge_idm_saas2forgeops.py` against the saas patch files, diffs the result against the static files in `kustomize/base/gitea-seed/idm-conf/`, updates them on disk if different, and prints a reminder to review and commit. It does **not** auto-commit.
+The `--saasrepo-path` option re-runs `bin/merge_idm_gitea-seed.py` against the saas patch files, diffs the result against the static files in `kustomize/base/gitea-seed/idm-conf/`, updates them on disk if different, and prints a reminder to review and commit. It does **not** auto-commit.
 
 ### am-mirror
 
-`bin/saas2forgeops.py am-mirror` mirrors the live AM root realm's tree and node config into `kustomize/base/gitea-seed/am-conf/` for alpha and bravo realms.
+`bin/gitea-seed.py am-mirror` mirrors the live AM root realm's tree and node config into `kustomize/base/gitea-seed/am-conf/` for alpha and bravo realms.
 
 **Why it exists:** Files exported directly from AIC are in AIC's export format (no `metadata` block) and cause NPE in `ConfigEntityConverter` on ForgeOps AM. The ForgeOps root realm ships files with `metadata.uid` in the correct format. `am-mirror` copies root realm files and adapts the realm reference and uid, producing valid ForgeOps-format files.
 
@@ -356,7 +356,7 @@ The `--saasrepo-path` option re-runs `bin/merge_idm_saas2forgeops.py` against th
 **When to re-run:** when the Login tree structure changes (new nodes added).
 
 ```sh
-python3 bin/saas2forgeops.py am-mirror --namespace fr-platform
+python3 bin/gitea-seed.py am-mirror --namespace fr-platform
 python3 bin/mock-tenant.py push-config --target am
 ```
 
@@ -364,7 +364,7 @@ python3 bin/mock-tenant.py push-config --target am
 
 Only whitelisted directories are included by `am-mirror`. The whitelist covers tree-node instance directories and a subset of realm service directories that produce ForgeOps-compatible files (with `metadata.uid`) when mirrored from the root realm. Service directories that are NOT whitelisted (e.g. `scriptingservice`, `iplanetamauthservice`) are excluded because their AIC export format lacks the `metadata` block and causes NPE in `ConfigEntityConverter` on ForgeOps AM.
 
-Current whitelist (`_AM_MIRROR_SAFE_DIRS` in `bin/saas2forgeops.py`):
+Current whitelist (`_AM_MIRROR_SAFE_DIRS` in `bin/gitea-seed.py`):
 ```
 authenticationtreesservice    datastoredecisionnode         incrementlogincountnode
 pagenode                      innertreeevaluatornode        logincountdecisionnode
@@ -536,8 +536,8 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | File | Purpose |
 |---|---|
 | `bin/mock-tenant.py` | Full deploy/push-config/bootstrap automation |
-| `bin/saas2forgeops.py` | IDM merge + AM mirror tool (`managed`, `repo-ds`, `access`, `am-mirror` subcommands) |
-| `bin/merge_idm_saas2forgeops.py` | IDM config merge tool (called by `saas2forgeops.py`) |
+| `bin/gitea-seed.py` | IDM merge + AM mirror tool (`merge managed`, `merge repo-ds`, `merge access`, `am-mirror` subcommands) |
+| `bin/merge_idm_gitea-seed.py` | IDM config merge tool (called by `gitea-seed.py`) |
 | `bin/get_admin_tok.sh` | Fetches AM admin token via curl |
 | `bin/tunnel` | Port-forwards nginx 443 for browser access |
 | `mock-tenant.md` | This document |
@@ -630,6 +630,7 @@ The Lodestar/Pyrock `idc.login` load test authenticates against the alpha realm 
 | `Insufficient Access Rights: unindexed search` | FIXED | `unindexed-search` DS privilege on `am-identity-bind-account` persisted in `docker/ds/runtime-scripts/ds-idrepo/post-init` |
 | `PatchObjectNode: identity resource mismatch (managed/user vs managed/alpha_user)` | FIXED | Node instance files rewritten to `managed/{realm}_user`; `am-mirror` now does this automatically |
 | **`idc.login` end-to-end** | **PASSING** | |
+| `httpClient` NPE in `LIBRARY_SCRIPT` (banc load test) | FIXED | `propertyNamePrefix: esv.` added to LIBRARY engine config; `esv-variables` must be populated via ESV import — see [Known Issues](#am) |
 
 ---
 
@@ -922,9 +923,33 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **`identityResource` must be set on every tree containing IDM nodes** — including inner trees. Not inherited from outer trees. See [identityResource on Inner Trees](#identityresource-on-inner-trees).
 
-- **`PatchObjectNode` (and other IDM node) instance files carry `managed/user` from the root realm** — AM validates that the node-level `identityResource` matches the tree-level one and throws `NodeProcessException: Configured identity resource for the node (managed/user) does not match the configured identity resource for the tree (managed/alpha_user)` if they differ. Node instance files mirrored from the root realm must have `identityResource` rewritten to `managed/{realm}_user`. `saas2forgeops.py am-mirror` now does this automatically for `patchobjectnode`, `queryfilterdecisionnode`, `incrementlogincountnode`, and `logincountdecisionnode` instance files.
+- **`PatchObjectNode` (and other IDM node) instance files carry `managed/user` from the root realm** — AM validates that the node-level `identityResource` matches the tree-level one and throws `NodeProcessException: Configured identity resource for the node (managed/user) does not match the configured identity resource for the tree (managed/alpha_user)` if they differ. Node instance files mirrored from the root realm must have `identityResource` rewritten to `managed/{realm}_user`. `gitea-seed.py am-mirror` now does this automatically for `patchobjectnode`, `queryfilterdecisionnode`, `incrementlogincountnode`, and `logincountdecisionnode` instance files.
 
 - **`/admin` URL (IDM Admin UI) is not available** — the IDM Admin UI at `/admin` was deprecated and removed from ForgeOps. Use `/platform` instead.
+
+- **`LIBRARY_SCRIPT` NPE when calling `httpClient` — caused by missing `propertyNamePrefix` in engine config, not a missing binding**
+
+  **Symptom:** Any `LIBRARY_SCRIPT` that calls `httpClient.send(KEYS_SERVICE_URL, ...)` throws a NullPointerException at the `httpClient.send(...)` line. AM logs: `Script '...' with evaluatorVersion 2.0 in realm /alpha terminated with exception ... Wrapped java.lang.NullPointerException (library_get_key_pinblock#34)`. Immediately before this, the log also emits: `WARN: propertyName must start with [script]`.
+
+  **Root cause — two problems in sequence:**
+
+  1. **`systemEnv.getProperty()` returns `null` due to wrong prefix.** `PrefixedScriptPropertyResolver` — which backs `systemEnv` in all V2 scripts — validates that the requested property name starts with a configured prefix before resolving it. If the name fails the check it logs `propertyName must start with [script]` and returns `null`. The script does:
+     ```javascript
+     var KEYS_SERVICE_URL = systemEnv.getProperty("esv.service.keys.pinblock.url")
+     ```
+     The property name starts with `"esv."`. The LIBRARY context engine config's `propertyNamePrefix` was `"script"` (inherited from the image-baked base config), so the check fails and `KEYS_SERVICE_URL` is set to `null`.
+
+  2. **`httpClient.send(null, ...)` throws NPE.** `httpClient` itself IS present and non-null — ForgeOps AM 8.1.1 (`openam-scripting-8.1.1.jar`) contains `HttpClientScriptWrapper` and `CommonBindingsFactory.getV2Bindings()` injects `httpClient` for all V2 script contexts. The NPE occurs because the URL argument is `null`.
+
+  **Why it works in AIC:** The AIC production FBC overlay for `AUTHENTICATION_TREE_DECISION_NODE` sets `"propertyNamePrefix": "esv."`. Library scripts execute in the calling script's context chain, so they inherit the `esv.` prefix and `systemEnv.getProperty("esv.service.keys.pinblock.url")` resolves correctly.
+
+  **Fix:** Add `"propertyNamePrefix": "esv."` to the LIBRARY engine config in the gitea-seed. This is done in `kustomize/base/gitea-seed/am-conf/realm/root/scriptingservice/1.0/globalconfig/default/library/engineconfiguration.json` — committed and pushed via `push-config --target am`. After the AM rolling restart, `systemEnv.getProperty("esv.service.keys.pinblock.url")` will resolve the value from the pod's env vars (populated via `esv-variables` envFrom after running ESV import + `POST /environment/restart`).
+
+  **Second prerequisite — ESV import must be applied:** The `esv-variables` ConfigMap must be populated before AM starts. Run:
+  ```sh
+  ./lodestar.py tenant apply-customer-configuration --customer-configuration banc --mock-tenant
+  ```
+  Then confirm the projection was applied: `kubectl get cm esv-variables -n fr-platform -o yaml | grep pinblock`
 
 ### DS
 
@@ -935,6 +960,8 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 ### IDM
 
 - **`managed.json` gitea-seed uses `--server-side` apply** — the file is 323KB, exceeding the 262KB `kubectl.kubernetes.io/last-applied-configuration` annotation limit. Standard `kubectl apply` will fail; `mock-tenant.py` uses `--server-side`.
+
+- **AM and IDM `fbc` PVCs use `ReadWriteOnce` — do not scale past 1 replica** — both `am-fbc` and `idm-fbc` PVCs are provisioned with `accessModes: ReadWriteOnce`, which only allows a single node to mount the volume at a time. Scaling `Deployment/am` or `Deployment/idm` to more than one replica would cause multiple processes writing to the same filesystem directory simultaneously, risking config file corruption and undefined startup behaviour. This stack is single-replica by design; do not raise the replica count without first replacing the PVCs with a `ReadWriteMany`-capable storage class or switching to a different persistence strategy.
 
 ### ESV Shim
 

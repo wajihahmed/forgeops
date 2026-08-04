@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Apply saas patch documents onto forgeops base config files, or mirror AM tree
-config from a live pod for alpha/bravo realms.
+Prepare config files for the Gitea customer-config seed repo.
+
+Merges IDM config files from the saas repo into ForgeOps-compatible static files,
+or mirrors AM tree config from a live pod into the am-conf/ seed directory.
 
 Subcommands:
 
-  managed   -- patches managed.json (adds/removes IDM managed object types)
-  repo-ds   -- patches repo.ds.json (adds resource mappings for saas object types)
-  access    -- patches access.json  (adds saas roles and access policy entries)
-  am-mirror -- mirrors root realm tree/node config from a live AM pod into
-               am-conf/ for alpha and bravo realms (no saas repo needed)
+  merge managed   -- patches managed.json (adds/removes IDM managed object types)
+  merge repo-ds   -- patches repo.ds.json (adds resource mappings for saas object types)
+  merge access    -- patches access.json  (adds saas roles and access policy entries)
+  am-mirror       -- mirrors root realm tree/node config from a live AM pod into
+                     am-conf/ for alpha and bravo realms (no saas repo needed)
 
 All IDM subcommands are idempotent: running them against an already-merged file
 produces the same output as running them against the original base.
@@ -33,32 +35,32 @@ Usage:
 
     SAAS=/path/to/saas/services/idm/idm-idc-overrides/system
 
-    python3 bin/saas2forgeops.py managed \\
+    python3 bin/gitea-seed.py merge managed \\
         /tmp/base-managed.json $SAAS/managed.json > /tmp/merged-managed.json
 
-    python3 bin/saas2forgeops.py repo-ds \\
+    python3 bin/gitea-seed.py merge repo-ds \\
         /tmp/base-repo.ds.json $SAAS/repo.ds.json > /tmp/merged-repo.ds.json
 
-    python3 bin/saas2forgeops.py access \\
+    python3 bin/gitea-seed.py merge access \\
         /tmp/base-access.json $SAAS/access.json > /tmp/merged-access.json
 
-    python3 bin/saas2forgeops.py am-mirror [--namespace fr-platform] [--am-conf kustomize/base/gitea-seed/am-conf]
+    python3 bin/gitea-seed.py am-mirror [--namespace fr-platform] [--am-conf kustomize/base/gitea-seed/am-conf]
 
 Notes:
-  managed subcommand:
+  merge managed:
     - "remove /objects[/name eq \"foo\"]" ops are skipped if the object is absent.
     - "add /objects/-" ops are skipped if an object with the same name already exists.
     - svcacct's scopes policy references "&{fraas.svcacct.allowed.scopes}" — set this ESV
       variable via the ESV shim before IDM starts or the policy evaluates against an empty list.
 
-  repo-ds subcommand:
+  merge repo-ds:
     - /ldapConnectionFactories is always skipped — it contains saas-specific hostnames
       (userstore-0.userstore, userstore-2.userstore) that would break IDM's connection to
       ds-idrepo. The forgeops base already has the correct ds-idrepo hostname.
     - "replace" and "add" operations on any other path navigate the JSON tree (URL-decoded
       path segments), creating intermediate dicts as needed. Idempotent by nature.
 
-  access subcommand:
+  merge access:
     - Handles IDM's array-filter patch syntax on the top-level "configs" array:
         remove  /configs[/field op "value" and ...]  -- remove matching entries
         replace /configs[/field op "value" and ...]  -- replace first matching entry
@@ -66,7 +68,7 @@ Notes:
                                                         skipping exact duplicates
     - Supported filter operators: eq (equals), co (contains).
 
-  am-mirror subcommand:
+  am-mirror:
     - Only whitelisted service dirs are mirrored (see _AM_MIRROR_SAFE_DIRS).
     - Service config dirs from AIC (oauth2provider, scriptingservice, etc.) are excluded —
       they are in AIC export format and cause NPE in ConfigEntityConverter on forgeops AM.
@@ -449,7 +451,7 @@ def cmd_am_mirror(argv):
     os.chdir(os.path.join(os.path.dirname(__file__), ".."))
 
     parser = argparse.ArgumentParser(
-        prog="saas2forgeops.py am-mirror",
+        prog="gitea-seed.py am-mirror",
         description="Mirror root realm tree/node config from a live AM pod into am-conf/.",
     )
     parser.add_argument("--namespace", default="fr-platform")
@@ -476,35 +478,45 @@ def cmd_am_mirror(argv):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-SUBCOMMANDS = ("managed", "repo-ds", "access", "am-mirror")
+MERGE_SUBCOMMANDS = ("managed", "repo-ds", "access")
+TOP_COMMANDS = ("merge", "am-mirror")
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in SUBCOMMANDS:
+    if len(sys.argv) < 2 or sys.argv[1] not in TOP_COMMANDS:
         print(
             "Usage:\n"
-            + "\n".join(f"  saas2forgeops.py {s}  <base> <patch>"
-                        for s in ("managed", "repo-ds", "access"))
-            + "\n  saas2forgeops.py am-mirror  [--namespace fr-platform] [--am-conf <dir>]"
-            + "\n\nIDM output is written to stdout. am-mirror writes files in-place.",
+            "  gitea-seed.py merge <managed|repo-ds|access>  <base> <patch>\n"
+            "  gitea-seed.py am-mirror  [--namespace fr-platform] [--am-conf <dir>]\n"
+            "\nIDM merge output is written to stdout. am-mirror writes files in-place.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    subcommand = sys.argv[1]
+    command = sys.argv[1]
 
-    if subcommand == "am-mirror":
+    if command == "am-mirror":
         cmd_am_mirror(sys.argv[2:])
         return
 
-    if len(sys.argv) != 4:
+    # merge subcommand
+    if len(sys.argv) < 3 or sys.argv[2] not in MERGE_SUBCOMMANDS:
         print(
-            f"Usage: saas2forgeops.py {subcommand}  <base> <patch>",
+            f"Usage: gitea-seed.py merge <{'|'.join(MERGE_SUBCOMMANDS)}>  <base> <patch>",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    base_path, patch_path = sys.argv[2], sys.argv[3]
+    subcommand = sys.argv[2]
+
+    if len(sys.argv) != 5:
+        print(
+            f"Usage: gitea-seed.py merge {subcommand}  <base> <patch>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    base_path, patch_path = sys.argv[3], sys.argv[4]
 
     with open(base_path) as f:
         base = json.load(f)
