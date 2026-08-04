@@ -16,7 +16,7 @@ spec:
           value: -Dam.server.protocol=https -Dam.server.fqdn=mock.iam.example.com
             -Dam.server.port=443
         - name: FBC_BASE_PATHS
-          value: "-Dcom.forgerock.am.fileconfig.basepaths=/home/forgerock/base/config/services,/home/forgerock/openam/config/services"
+          value: "-Dcom.forgerock.am.fileconfig.basepaths=/home/forgerock/openam/config/services,/home/forgerock/base/config/services"
         envFrom:
         - secretRef:
             name: am-env-secrets
@@ -24,12 +24,10 @@ spec:
             name: platform-config
         - secretRef:
             name: ds-env-secrets
-        - configMapRef:
-            name: esv-variables
-            optional: true
-        - secretRef:
-            name: esv-secrets
-            optional: true
+        volumeMounts:
+        - name: catalina-properties
+          mountPath: /usr/local/tomcat/conf/catalina.properties
+          subPath: catalina.properties
         imagePullPolicy: Always
         lifecycle:
           postStart:
@@ -58,6 +56,10 @@ spec:
                         -d "{\"name\": \"$REALM\", \"parentPath\": \"/\", \"active\": true, \"aliases\": []}" >/dev/null 2>&1
                     fi
                   done
+      volumes:
+      - name: catalina-properties
+        configMap:
+          name: am-catalina-properties
       initContainers:
       - name: custom-vol-init
         image: config-loader:local

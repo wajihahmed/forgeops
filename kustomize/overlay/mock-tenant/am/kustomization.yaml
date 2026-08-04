@@ -5,6 +5,7 @@ components:
 resources:
 - ../../../base/am/secret-generator
 - am-fbc-pvc.yaml
+- catalina-properties-cm.yaml
 patches:
 - path: deployment.yaml
 - path: fbc-pvc-patch.yaml

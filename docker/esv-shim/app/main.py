@@ -24,9 +24,124 @@ RESTART_ANNOTATION = "esv.forgeops/restarted-at"
 VAR_PREFIX = "esv-var-"
 SECRET_PREFIX = "esv-secret-"
 MAPPING_PREFIX = "esv-mapping-"
-PROJECTION_CONFIGMAP_NAME = "esv-variables"
-PROJECTION_SECRET_NAME = "esv-secrets"
+CATALINA_PROPERTIES_CM = "am-catalina-properties"
 RESTART_DEPLOYMENTS = ["am", "idm"]
+
+# Base catalina.properties content — Tomcat bootstrap loads this as system properties.
+# ESV values are appended as esv.foo.bar=value entries by do_restart().
+CATALINA_PROPERTIES_BASE = """\
+package.access=sun.,org.apache.catalina.,org.apache.coyote.,org.apache.jasper.,org.apache.tomcat.
+package.definition=sun.,java.,org.apache.catalina.,org.apache.coyote.,\\
+org.apache.jasper.,org.apache.naming.,org.apache.tomcat.
+
+common.loader="${catalina.base}/lib","${catalina.base}/lib/*.jar","${catalina.home}/lib","${catalina.home}/lib/*.jar"
+server.loader=
+shared.loader=
+
+tomcat.util.scan.StandardJarScanFilter.jarsToSkip=\\
+annotations-api.jar,\\
+ant-junit*.jar,\\
+ant-launcher*.jar,\\
+ant*.jar,\\
+asm-*.jar,\\
+aspectj*.jar,\\
+bcel*.jar,\\
+biz.aQute.bnd*.jar,\\
+bootstrap.jar,\\
+catalina-ant.jar,\\
+catalina-ha.jar,\\
+catalina-ssi.jar,\\
+catalina-storeconfig.jar,\\
+catalina-tribes.jar,\\
+catalina.jar,\\
+cglib-*.jar,\\
+cobertura-*.jar,\\
+commons-beanutils*.jar,\\
+commons-codec*.jar,\\
+commons-collections*.jar,\\
+commons-compress*.jar,\\
+commons-daemon.jar,\\
+commons-dbcp*.jar,\\
+commons-digester*.jar,\\
+commons-fileupload*.jar,\\
+commons-httpclient*.jar,\\
+commons-io*.jar,\\
+commons-lang*.jar,\\
+commons-logging*.jar,\\
+commons-math*.jar,\\
+commons-pool*.jar,\\
+derby-*.jar,\\
+dom4j-*.jar,\\
+easymock-*.jar,\\
+ecj-*.jar,\\
+el-api.jar,\\
+geronimo-spec-jaxrpc*.jar,\\
+h2*.jar,\\
+ha-api-*.jar,\\
+hamcrest-*.jar,\\
+hibernate*.jar,\\
+httpclient*.jar,\\
+icu4j-*.jar,\\
+jakartaee-migration-*.jar,\\
+jasper-el.jar,\\
+jasper.jar,\\
+jaspic-api.jar,\\
+jaxb-*.jar,\\
+jaxen-*.jar,\\
+jaxws-rt-*.jar,\\
+jdom-*.jar,\\
+jetty-*.jar,\\
+jmx-tools.jar,\\
+jmx.jar,\\
+jsp-api.jar,\\
+jstl.jar,\\
+jta*.jar,\\
+junit-*.jar,\\
+junit.jar,\\
+log4j*.jar,\\
+mail*.jar,\\
+objenesis-*.jar,\\
+oraclepki.jar,\\
+org.hamcrest.core_*.jar,\\
+org.junit_*.jar,\\
+oro-*.jar,\\
+servlet-api-*.jar,\\
+servlet-api.jar,\\
+slf4j*.jar,\\
+taglibs-standard-spec-*.jar,\\
+tagsoup-*.jar,\\
+tomcat-api.jar,\\
+tomcat-coyote.jar,\\
+tomcat-coyote-ffm.jar,\\
+tomcat-dbcp.jar,\\
+tomcat-i18n-*.jar,\\
+tomcat-jdbc.jar,\\
+tomcat-jni.jar,\\
+tomcat-juli-adapters.jar,\\
+tomcat-juli.jar,\\
+tomcat-util-scan.jar,\\
+tomcat-util.jar,\\
+tomcat-websocket.jar,\\
+tools.jar,\\
+unboundid-ldapsdk-*.jar,\\
+websocket-api.jar,\\
+websocket-client-api.jar,\\
+wsdl4j*.jar,\\
+xercesImpl.jar,\\
+xml-apis.jar,\\
+xmlParserAPIs-*.jar,\\
+xmlParserAPIs.jar,\\
+xom-*.jar
+
+tomcat.util.scan.StandardJarScanFilter.jarsToScan=\\
+log4j-taglib*.jar,\\
+log4j-jakarta-web*.jar,\\
+log4javascript*.jar,\\
+slf4j-taglib*.jar
+
+tomcat.util.buf.StringCache.byte.enabled=true
+org.apache.el.GET_CLASSLOADER_USE_PRIVILEGED=false
+"""
 
 # ESV ids observed in the wild look like "esv-hmac-sha256-key-2" / "esv-error-map".
 ID_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -296,35 +411,54 @@ def restart_deployment(deployment_name: str) -> bool:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _escape_properties_value(value: str) -> str:
+    """Escape a value for Java .properties format (backslash, then handle newlines)."""
+    # Escape backslashes first, then newlines as \n (single line value)
+    value = value.replace("\\", "\\\\")
+    value = value.replace("\n", "\\n")
+    value = value.replace("\r", "\\r")
+    return value
+
+
 def do_restart():
     """
     Real AIC has no separate 'apply' step: a PUT to /environment/{secrets,variables}/{id}
     is durable immediately, and POST /environment/restart is what makes AM pick the new
-    values up (see tenant_config_importer.py's _restart_am_for_esv). Since AM/IDM here read
-    ESVs via envFrom rather than a live AIC-style property store, this endpoint additionally
-    re-projects every item into esv-variables/esv-secrets before triggering the restart.
+    values up. AM scripts read ESVs via systemEnv.getProperty() which resolves against
+    JVM system properties. Tomcat loads catalina.properties into system properties at
+    bootstrap — so we project all ESVs there, translating esv-foo-bar -> esv.foo.bar.
     """
     cms = core_v1.list_namespaced_config_map(NAMESPACE, label_selector=f"{TYPE_LABEL}=variable").items
     secrets = core_v1.list_namespaced_secret(NAMESPACE, label_selector=f"{TYPE_LABEL}=secret").items
 
-    var_data = {}
+    esv_props = {}
     for cm in cms:
         plain = (cm.data or {}).get("value", "")
-        var_data[cm.metadata.name[len(VAR_PREFIX):]] = plain
+        dot_key = cm.metadata.name[len(VAR_PREFIX):].replace("-", ".")
+        esv_props[dot_key] = plain
 
-    secret_data = {}
     for s in secrets:
-        raw = (s.data or {}).get("value", "")
-        secret_data[s.metadata.name[len(SECRET_PREFIX):]] = raw
+        raw_b64 = (s.data or {}).get("value", "")
+        try:
+            plain = base64.b64decode(raw_b64).decode("utf-8", errors="replace")
+        except Exception:
+            plain = raw_b64
+        dot_key = s.metadata.name[len(SECRET_PREFIX):].replace("-", ".")
+        esv_props[dot_key] = plain
 
-    project_configmap(PROJECTION_CONFIGMAP_NAME, var_data)
-    project_secret(PROJECTION_SECRET_NAME, secret_data)
+    esv_lines = "\n".join(
+        f"{k}={_escape_properties_value(v)}"
+        for k, v in sorted(esv_props.items())
+    )
+    catalina_content = CATALINA_PROPERTIES_BASE + "\n# ESV values injected by esv-shim\n" + esv_lines + "\n"
+
+    project_configmap(CATALINA_PROPERTIES_CM, {"catalina.properties": catalina_content})
 
     restarted = [d for d in RESTART_DEPLOYMENTS if restart_deployment(d)]
 
     return {
-        "variableCount": len(var_data),
-        "secretCount": len(secret_data),
+        "variableCount": len([k for k in esv_props if k.startswith("esv.")]),
+        "secretCount": len(secrets),
         "restarted": restarted,
     }
 
