@@ -507,7 +507,8 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `kustomize/overlay/mock-tenant/kustomization.yaml` | Top-level overlay kustomization |
 | `kustomize/overlay/mock-tenant/base/platform-config.yaml` | `FQDN` + `AM_SERVER_FQDN: mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/image-defaulter/kustomization.yaml` | Local image tag mappings (`ds:local`, `config-loader:local`, `esv-shim:local`) |
-| `kustomize/overlay/mock-tenant/am/deployment.yaml` | `custom-vol-init` patch, `CATALINA_USER_OPTS`, `FBC_BASE_PATHS`, envFrom, `postStart` realm hook |
+| `kustomize/overlay/mock-tenant/am/deployment.yaml` | `custom-vol-init` patch, `CATALINA_USER_OPTS`, `FBC_BASE_PATHS`, envFrom, `postStart` realm hook, `catalina-properties` subPath volume mount |
+| `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` | `am-catalina-properties` ConfigMap — base Tomcat `catalina.properties` + ESV values appended by shim on restart |
 | `kustomize/overlay/mock-tenant/am/ingress-fqdn.yaml` | AM host/TLS → `mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/am/service.yaml` | `targetPort: http` (was `https`) |
 | `kustomize/overlay/mock-tenant/amster/amster-job.yaml` | Amster job: SSH key path fix (`id_rsa`) |
@@ -630,7 +631,7 @@ The Lodestar/Pyrock `idc.login` load test authenticates against the alpha realm 
 | `Insufficient Access Rights: unindexed search` | FIXED | `unindexed-search` DS privilege on `am-identity-bind-account` persisted in `docker/ds/runtime-scripts/ds-idrepo/post-init` |
 | `PatchObjectNode: identity resource mismatch (managed/user vs managed/alpha_user)` | FIXED | Node instance files rewritten to `managed/{realm}_user`; `am-mirror` now does this automatically |
 | **`idc.login` end-to-end** | **PASSING** | |
-| `httpClient` NPE in `LIBRARY_SCRIPT` (banc load test) | FIXED | `propertyNamePrefix: esv.` added to LIBRARY engine config; `esv-variables` must be populated via ESV import — see [Known Issues](#am) |
+| `httpClient` NPE in `LIBRARY_SCRIPT` (banc load test) | FIXED | `SCRIPTED_DECISION_NODE` `propertyNamePrefix: "esv."` + ESVs injected via `catalina.properties`; see [Known Issues](#am) |
 
 ---
 
@@ -717,21 +718,24 @@ Per-item objects (source of truth, PUT-upsert target):
 
 POST /environment/restart:
    1. List all esv-var-* / esv-secret-* objects by label
-   2. Project into two aggregate objects AM/IDM consume via envFrom:
-        ConfigMap  esv-variables   (merged variable data, plain values)
-        Secret     esv-secrets     (merged secret data, plain values)
+   2. Build catalina.properties content = base Tomcat properties + ESV entries:
+        esv.foo.bar=<value>   (esv-foo-bar key translated to dot notation)
+        Values escaped for Java .properties format (handles large JSON/key pairs)
+      Patch ConfigMap am-catalina-properties with this content
+      AM Deployment mounts am-catalina-properties at /usr/local/tomcat/conf/catalina.properties
+      via subPath — Tomcat loads this into JVM system properties at bootstrap
    3. Patch Deployment am and Deployment idm with a
       esv.forgeops/restarted-at: <timestamp> pod-template annotation
-      → triggers a rolling restart
+      → triggers a rolling restart; new AM pod starts with ESV values in system properties
 ```
 
 **Key design decisions:**
 - **Storage:** one Kubernetes object per ESV item (`esv-var-<id>` ConfigMap, `esv-secret-<id>` Secret) — trivial CRUD, per-item metadata via annotations
-- **Apply mechanism:** aggregates all items into `esv-variables` ConfigMap and `esv-secrets` Secret (both pre-shipped empty so AM/IDM don't crash on first boot), then roll-restarts AM/IDM via a pod-template annotation patch
+- **Apply mechanism:** projects all ESV values into `am-catalina-properties` ConfigMap as Java system properties (`esv.foo.bar=value`), then roll-restarts AM/IDM. AM scripts call `systemEnv.getProperty("esv.foo.bar")` which resolves against JVM system properties — Tomcat's `catalina.properties` is the correct injection point, replicating what AIC's `secrets-loader` does.
+- **Why not env vars:** `systemEnv.getProperty()` uses `System.getProperty()` (JVM system properties), not `System.getenv()`. Env var names cannot contain dots on Linux, so `esv-foo-bar` (dashes) cannot be looked up as `esv.foo.bar` (dots). The `catalina.properties` approach handles this correctly and also supports large values (JSON blobs, key pairs) without command-line length limits.
 - **Auth:** none — ClusterIP only, cluster-internal
 - **PUT is an upsert** — `201` if id didn't exist, `200` if it did; no POST-to-create — matches real AIC
 - **`GET /environment/secrets/{_id}` never returns the secret value** — metadata only, matching real AIC (lodestar retrieves clear-text secrets via a separate IDM script-eval endpoint)
-- **Why `esv-variables`/`esv-secrets` instead of merging into `platform-config`:** AM's `envFrom` reads `platform-config`; IDM's reads its own `idm` ConfigMap — there is no single object both already consume. Separate projection objects avoid commingling shim-owned runtime state with Kustomize-managed ConfigMaps that are re-applied verbatim on every `bin/forgeops apply`.
 
 ### API Surface
 
@@ -747,7 +751,7 @@ Wire-format compatible with real AIC, verified by running lodestar's `tenant_uti
 | GET | `/environment/secrets/{_id}` | single item metadata, same shape (no value) |
 | PUT | `/environment/secrets/{_id}` | body: `{valueBase64, description?, encoding?, useInPlaceholders?}` — upsert: `201` / `200` |
 | DELETE | `/environment/secrets/{_id}` | `204` |
-| POST | `/environment/restart` | project all items → `esv-variables`/`esv-secrets` + roll-restart am/idm; returns `{variableCount, secretCount, restarted}` |
+| POST | `/environment/restart` | project all items → `am-catalina-properties` (JVM system properties) + roll-restart am/idm; returns `{variableCount, secretCount, restarted}` |
 | POST | `/environment/apply` | alias of `/environment/restart` (convenience — not part of real AIC API) |
 
 ### RBAC
@@ -782,16 +786,14 @@ python3 /path/to/lodestar/shared/scripts/tenant_util.py esv list \
 
 # Confirm projection + restart:
 curl -X POST http://localhost:8090/environment/restart
-kubectl get cm esv-variables -n fr-platform -o yaml
-kubectl get secret esv-secrets -n fr-platform -o yaml
 kubectl rollout status deployment/am -n fr-platform
 
-# Confirm AM/IDM pods see the injected values:
-kubectl exec -n fr-platform deploy/am -- env | grep <esv-variable-id>
+# Confirm ESV values are in catalina.properties (JVM system properties):
+kubectl exec -n fr-platform deploy/am -- grep "esv\." /usr/local/tomcat/conf/catalina.properties | head -10
 ```
 
 **Important gotchas:**
-- ESV shim changes require `POST /environment/restart` to take effect — writes to per-item objects are immediate and durable, but AM/IDM read via `envFrom` from the aggregate projection objects; `/environment/restart` re-projects and triggers the rolling restart
+- ESV shim changes require `POST /environment/restart` to take effect — writes to per-item objects are immediate and durable, but AM reads ESVs from `catalina.properties` which is only updated and loaded at pod startup; `/environment/restart` re-projects into `am-catalina-properties` and triggers the rolling restart
 - `docker build` for `esv-shim:local` must target the OrbStack docker context — see [Known Issues](#known-issues--gotchas)
 
 ---
@@ -927,29 +929,25 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **`/admin` URL (IDM Admin UI) is not available** — the IDM Admin UI at `/admin` was deprecated and removed from ForgeOps. Use `/platform` instead.
 
-- **`LIBRARY_SCRIPT` NPE when calling `httpClient` — caused by missing `propertyNamePrefix` in engine config, not a missing binding**
+- **`LIBRARY_SCRIPT` NPE when calling `httpClient` — caused by wrong `propertyNamePrefix` and ESV injection mechanism** *(FIXED)*
 
-  **Symptom:** Any `LIBRARY_SCRIPT` that calls `httpClient.send(KEYS_SERVICE_URL, ...)` throws a NullPointerException at the `httpClient.send(...)` line. AM logs: `Script '...' with evaluatorVersion 2.0 in realm /alpha terminated with exception ... Wrapped java.lang.NullPointerException (library_get_key_pinblock#34)`. Immediately before this, the log also emits: `WARN: propertyName must start with [script]`.
+  **Symptom:** `Script '...' with evaluatorVersion 2.0 terminated with exception ... Wrapped java.lang.NullPointerException (library_get_key_pinblock#34)`. Previously also preceded by `WARN: propertyName must start with [script]`.
 
   **Root cause — two problems in sequence:**
 
-  1. **`systemEnv.getProperty()` returns `null` due to wrong prefix.** `PrefixedScriptPropertyResolver` — which backs `systemEnv` in all V2 scripts — validates that the requested property name starts with a configured prefix before resolving it. If the name fails the check it logs `propertyName must start with [script]` and returns `null`. The script does:
-     ```javascript
-     var KEYS_SERVICE_URL = systemEnv.getProperty("esv.service.keys.pinblock.url")
-     ```
-     The property name starts with `"esv."`. The LIBRARY context engine config's `propertyNamePrefix` was `"script"` (inherited from the image-baked base config), so the check fails and `KEYS_SERVICE_URL` is set to `null`.
+  1. **`systemEnv.getProperty()` returns `null` due to wrong prefix.** `PrefixedScriptPropertyResolver` validates the requested property name against a configured prefix. The default prefix in the ForgeOps AM image is `"script"`, but banc scripts call `systemEnv.getProperty("esv.service.keys.pinblock.url")` — the `"esv."` prefix check fails, the resolver logs `propertyName must start with [script]`, and returns `null`.
 
-  2. **`httpClient.send(null, ...)` throws NPE.** `httpClient` itself IS present and non-null — ForgeOps AM 8.1.1 (`openam-scripting-8.1.1.jar`) contains `HttpClientScriptWrapper` and `CommonBindingsFactory.getV2Bindings()` injects `httpClient` for all V2 script contexts. The NPE occurs because the URL argument is `null`.
+     The resolver prefix comes from the **calling script's context**, not `LIBRARY`. Since the caller is a v2 evaluator node, the relevant context is `SCRIPTED_DECISION_NODE`. Fix: committed `kustomize/base/gitea-seed/am-conf/realm/root/scriptingservice/1.0/globalconfig/default/scripted_decision_node/engineconfiguration.json` with `"propertyNamePrefix": "esv."` (full baseline content, not a stub — required so it wins over the base image file on the PVC path). `FBC_BASE_PATHS` lists the PVC path first so this file takes precedence.
 
-  **Why it works in AIC:** The AIC production FBC overlay for `AUTHENTICATION_TREE_DECISION_NODE` sets `"propertyNamePrefix": "esv."`. Library scripts execute in the calling script's context chain, so they inherit the `esv.` prefix and `systemEnv.getProperty("esv.service.keys.pinblock.url")` resolves correctly.
+  2. **`systemEnv.getProperty()` still returned `null` even after prefix fix** — because ESV values were injected as env vars (`esv-service-keys-pinblock-url` with dashes) via `envFrom`, but `systemEnv.getProperty("esv.service.keys.pinblock.url")` resolves against **JVM system properties** (not env vars). Dots and dashes are not interchangeable — `System.getenv("esv.service.keys.pinblock.url")` returns null on Linux because dots are not valid in env var names. (In AIC, `secrets-loader` materialises ESVs into a properties file that is loaded as system properties at AM startup.)
 
-  **Fix:** Add `"propertyNamePrefix": "esv."` to the LIBRARY engine config in the gitea-seed. This is done in `kustomize/base/gitea-seed/am-conf/realm/root/scriptingservice/1.0/globalconfig/default/library/engineconfiguration.json` — committed and pushed via `push-config --target am`. After the AM rolling restart, `systemEnv.getProperty("esv.service.keys.pinblock.url")` will resolve the value from the pod's env vars (populated via `esv-variables` envFrom after running ESV import + `POST /environment/restart`).
+     Fix: the ESV shim's `do_restart()` now writes all ESV values into the `am-catalina-properties` ConfigMap as `esv.foo.bar=value` entries (translating `esv-foo-bar` key names, escaping values for Java `.properties` format to handle large values like JSON blobs and key pairs). The AM Deployment mounts this ConfigMap at `/usr/local/tomcat/conf/catalina.properties` via `subPath`. Tomcat loads `catalina.properties` into JVM system properties at bootstrap — making all ESV values available to `systemEnv.getProperty()` under the correct dot-notation keys.
 
-  **Second prerequisite — ESV import must be applied:** The `esv-variables` ConfigMap must be populated before AM starts. Run:
-  ```sh
-  ./lodestar.py tenant apply-customer-configuration --customer-configuration banc --mock-tenant
-  ```
-  Then confirm the projection was applied: `kubectl get cm esv-variables -n fr-platform -o yaml | grep pinblock`
+  **Files changed:**
+  - `kustomize/base/gitea-seed/am-conf/realm/root/scriptingservice/1.0/globalconfig/default/scripted_decision_node/engineconfiguration.json` — new, `propertyNamePrefix: "esv."`
+  - `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` — new ConfigMap with base `catalina.properties` content; ESV shim appends ESV entries on every restart
+  - `kustomize/overlay/mock-tenant/am/deployment.yaml` — mounts `am-catalina-properties` at `/usr/local/tomcat/conf/catalina.properties` via `subPath`; removed `esv-variables`/`esv-secrets` `envFrom` entries (no longer needed)
+  - `docker/esv-shim/app/main.py` — `do_restart()` projects ESVs into `am-catalina-properties` instead of `esv-variables`/`esv-secrets`
 
 ### DS
 
@@ -1085,7 +1083,7 @@ Committed in `7e486a062`. All forgeops-owned base and `overlay/default` files re
 - **13 base files reverted to master**: am/idm deployments (init container `custom-vol-init` back to image default), am/idm ingresses (`secretName` back to `tls-identity-platform.domain.local`), am services (port back to `https`), admin-ui ingress (`/admin` path removed), idm ingresses (`/admin` path restored), amster jobs (secret key back to `id_rsa`).
 - **overlay/default fully reverted to master**: 14 modified files reverted, 10 branch-added files deleted.
 - **mock-tenant patches added/updated**:
-  - `am/deployment.yaml`: `custom-vol-init` strategic merge patch — image `config-loader:local`, command `clone-and-copy`, Gitea env vars (`JSON_MERGE am/services`); `CATALINA_USER_OPTS`; `FBC_BASE_PATHS`; `esv-variables`/`esv-secrets` envFrom; `postStart` lifecycle hook that re-creates alpha/bravo realms on every pod start.
+  - `am/deployment.yaml`: `custom-vol-init` strategic merge patch — image `config-loader:local`, command `clone-and-copy`, Gitea env vars (`JSON_MERGE am/services`); `CATALINA_USER_OPTS`; `FBC_BASE_PATHS` (PVC path first so gitea-seed overrides base image); `postStart` lifecycle hook that re-creates alpha/bravo realms on every pod start; `catalina-properties` volume mount at `/usr/local/tomcat/conf/catalina.properties` (subPath) for ESV injection.
   - `idm/deployment.yaml`: `custom-vol-init` strategic merge patch — image `config-loader:local`, command `clone-and-copy`, Gitea env vars (`JSON_REPLACE idm`); `esv-variables`/`esv-secrets` envFrom.
   - `am/ingress-fqdn.yaml` / `idm/ingress-fqdn.yaml`: `op: replace secretName: platform-tls`.
   - `admin-ui/ingress-fqdn.yaml`: `op: replace secretName: platform-tls` + `op: add /admin path`.
