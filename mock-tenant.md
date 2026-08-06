@@ -469,9 +469,9 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 |---|---|
 | `docker/config-loader/Dockerfile` | config-loader image (Alpine + git + jq) |
 | `docker/config-loader/clone-and-copy.sh` | FBC init container script |
-| `docker/esv-shim/Dockerfile` | ESV shim image (python:3.12-slim + FastAPI) |
+| `docker/esv-shim/Dockerfile` | ESV shim image (python:3.12-slim + FastAPI + git) |
 | `docker/esv-shim/requirements.txt` | ESV shim Python dependencies |
-| `docker/esv-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64) |
+| `docker/esv-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM config to Gitea before restart |
 | `docker/ds/mock-tenant-config.sh` | Relaxes DS security settings for local dev |
 | `docker/ds/saas-compat-config.sh` | Applies saas-compatible DS settings at build time |
 | `docker/ds/Dockerfile.mock-tenant` | Two-stage DS build: inherits `ds:local-base`; copies mock-tenant runtime-scripts and runs mock-tenant/saas-compat config |
@@ -496,7 +496,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `kustomize/base/esv-shim/esv-shim-deployment.yaml` | ESV shim Deployment |
 | `kustomize/base/esv-shim/esv-shim-ingress.yaml` | ESV shim Ingress |
 | `kustomize/base/esv-shim/esv-shim-service.yaml` | ESV shim Service (ClusterIP, port 8080) |
-| `kustomize/base/esv-shim/esv-shim-rbac.yaml` | ESV shim ServiceAccount + Role + RoleBinding |
+| `kustomize/base/esv-shim/esv-shim-rbac.yaml` | ESV shim ServiceAccount + Role + RoleBinding (pods + pods/exec added for AM config mirror) |
 | `kustomize/base/esv-shim/esv-projection-configmap.yaml` | Empty `esv-variables` ConfigMap (pre-created) |
 | `kustomize/base/esv-shim/esv-projection-secret.yaml` | Empty `esv-secrets` Secret (pre-created) |
 
@@ -724,7 +724,8 @@ POST /environment/restart:
       Patch ConfigMap am-catalina-properties with this content
       AM Deployment mounts am-catalina-properties at /usr/local/tomcat/conf/catalina.properties
       via subPath — Tomcat loads this into JVM system properties at bootstrap
-   3. Patch Deployment am and Deployment idm with a
+   3. Mirror live AM config to Gitea (see below)
+   4. Patch Deployment am and Deployment idm with a
       esv.forgeops/restarted-at: <timestamp> pod-template annotation
       → triggers a rolling restart; new AM pod starts with ESV values in system properties
 ```
@@ -733,6 +734,7 @@ POST /environment/restart:
 - **Storage:** one Kubernetes object per ESV item (`esv-var-<id>` ConfigMap, `esv-secret-<id>` Secret) — trivial CRUD, per-item metadata via annotations
 - **Apply mechanism:** projects all ESV values into `am-catalina-properties` ConfigMap as Java system properties (`esv.foo.bar=value`), then roll-restarts AM/IDM. AM scripts call `systemEnv.getProperty("esv.foo.bar")` which resolves against JVM system properties — Tomcat's `catalina.properties` is the correct injection point, replicating what AIC's `secrets-loader` does.
 - **Why not env vars:** `systemEnv.getProperty()` uses `System.getProperty()` (JVM system properties), not `System.getenv()`. Env var names cannot contain dots on Linux, so `esv-foo-bar` (dashes) cannot be looked up as `esv.foo.bar` (dots). The `catalina.properties` approach handles this correctly and also supports large values (JSON blobs, key pairs) without command-line length limits.
+- **AM config mirror before restart:** `apply-customer-configuration` imports journeys and ESVs into live AM via REST, then calls `POST /environment/restart`. Because AM's `filesystem-init` init container repopulates `/home/forgerock/openam/config/services` from Gitea on every pod boot, any live config not committed to Gitea is lost on restart. To prevent this, `do_restart()` snapshots the live FBC realm directories (`realm/root-alpha`, `realm/root-bravo`) from the AM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `am/services/realm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only so ESV values always take effect even if Gitea is unreachable. This required adding `git` to the shim image and `pods`/`pods/exec` RBAC.
 - **Auth:** none — ClusterIP only, cluster-internal
 - **PUT is an upsert** — `201` if id didn't exist, `200` if it did; no POST-to-create — matches real AIC
 - **`GET /environment/secrets/{_id}` never returns the secret value** — metadata only, matching real AIC (lodestar retrieves clear-text secrets via a separate IDM script-eval endpoint)
@@ -763,6 +765,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     verbs: ["get","list","watch","create","update","patch","delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get","list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get","list","watch","patch"]
@@ -1005,6 +1013,22 @@ Lodestar, on the other hand, applies `kustomize/overlay/lodestar-mock-api/` as a
 ---
 
 ## TODO
+
+### 12. Replace AM FBC PVC with emptyDir
+
+The AM FBC PVC (`am-fbc-pvc`, `kustomize/overlay/mock-tenant/am/am-fbc-pvc.yaml` + `fbc-pvc-patch.yaml`) was introduced to persist `/home/forgerock/openam/config/services` across AM pod restarts so that live config changes (journeys, nodes) weren't lost. Now that `do_restart()` mirrors the live AM FBC back to Gitea before every restart, `filesystem-init` always repopulates from an up-to-date source — the PVC's persistence role is redundant.
+
+AM originally used `emptyDir` for this volume. Reverting to `emptyDir` simplifies the stack: no storage class dependency, no PVC provisioning delay during deploy, and no risk of stale volume data from a previous deployment bleeding through.
+
+**Caveat — crash resilience:** The Gitea mirror only runs inside `do_restart()`, which is triggered by `POST /environment/restart`. If AM crashes (OOM, node eviction, etc.) and Kubernetes restarts the pod directly, `filesystem-init` repopulates from Gitea — which only reflects the state at the last mirror. Any live config changes made after the last `POST /environment/restart` (e.g. journeys imported without a subsequent ESV restart) would be lost. With the PVC those changes survive because the volume persists independently of the pod lifecycle. This item should only be actioned if a separate mechanism is added to trigger a mirror on every live AM config change, not just on ESV restart.
+
+**Possible mechanism — FBC watcher sidecar:** A sidecar in the AM pod could watch the FBC directory (`/home/forgerock/openam/config/services`) using `inotifywait` (kernel-level inotify, not polling) in recursive mode with `-e close_write`, and on detecting any write debounce via a timer — reset the timer on each event, and only when a quiet period expires (e.g. 10 seconds of no new writes) make a single call to a dedicated `POST /config/mirror` endpoint on the ESV shim. That endpoint would do only the Gitea push step, without the `catalina.properties` rebuild or the AM restart. AM can write many files during a journey import; debouncing means only one mirror call goes out at the end of the burst. No restart, no ESV projection, just the Gitea push.
+
+**Files to change:**
+- Remove `kustomize/overlay/mock-tenant/am/am-fbc-pvc.yaml`
+- Remove `kustomize/overlay/mock-tenant/am/fbc-pvc-patch.yaml`
+- Remove both from `kustomize/overlay/mock-tenant/am/kustomization.yaml`
+- The base `kustomize/base/am/` volume definition already uses `emptyDir` — no base change needed
 
 ### 9. Reduce Deploy Time Below 5 Minutes
 

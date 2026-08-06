@@ -1,8 +1,13 @@
 import base64
 import datetime
+import io
 import json
 import os
 import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -26,6 +31,10 @@ SECRET_PREFIX = "esv-secret-"
 MAPPING_PREFIX = "esv-mapping-"
 CATALINA_PROPERTIES_CM = "am-catalina-properties"
 RESTART_DEPLOYMENTS = ["am", "idm"]
+
+GITEA_CLONE_URL = "http://forgerock:forgerock@gitea.fr-platform.svc.cluster.local:3000/forgerock/customer-config.git"
+AM_FBC_ROOT = "/home/forgerock/openam/config/services"
+AM_MIRROR_REALM_DIRS = ["realm/root-alpha", "realm/root-bravo"]
 
 # Base catalina.properties content — Tomcat bootstrap loads this as system properties.
 # ESV values are appended as esv.foo.bar=value entries by do_restart().
@@ -420,6 +429,60 @@ def _escape_properties_value(value: str) -> str:
     return value
 
 
+def _mirror_am_to_gitea():
+    """
+    Snapshot the live AM FBC realm directories from the AM pod and push them to
+    Gitea so that filesystem-init re-populates the correct config on next pod restart.
+    Called from do_restart() before AM is restarted — ensures journeys/nodes imported
+    live via REST API survive the restart cycle.
+    """
+    from kubernetes.stream import stream as k8s_stream
+
+    pods = core_v1.list_namespaced_pod(NAMESPACE, label_selector="app=am").items
+    if not pods:
+        raise RuntimeError("No AM pod found — cannot mirror config to Gitea")
+    pod_name = pods[0].metadata.name
+
+    # Stream realm dirs out of the pod as a base64-encoded tar so binary data
+    # travels safely over the websocket text channel
+    dirs_arg = " ".join(AM_MIRROR_REALM_DIRS)
+    resp = k8s_stream(
+        core_v1.connect_get_namespaced_pod_exec,
+        pod_name, NAMESPACE,
+        command=["sh", "-c", f"tar -C {AM_FBC_ROOT} -cf - {dirs_arg} | base64"],
+        stderr=False, stdin=False, stdout=True, tty=False,
+    )
+    tar_bytes = base64.b64decode(resp)
+
+    clone_dir = tempfile.mkdtemp(prefix="esv-shim-mirror-")
+    try:
+        subprocess.run(
+            ["git", "clone", GITEA_CLONE_URL, clone_dir],
+            check=True, capture_output=True,
+        )
+        subprocess.run(["git", "-C", clone_dir, "config", "user.email", "esv-shim@localhost"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone_dir, "config", "user.name", "esv-shim"], check=True, capture_output=True)
+
+        am_services_dst = os.path.join(clone_dir, "am", "services")
+        os.makedirs(am_services_dst, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tf:
+            tf.extractall(path=am_services_dst)
+
+        subprocess.run(["git", "-C", clone_dir, "add", "am/services/realm/"], check=True, capture_output=True)
+        r = subprocess.run(
+            ["git", "-C", clone_dir, "diff", "--cached", "--quiet"],
+            check=False, capture_output=True,
+        )
+        if r.returncode != 0:
+            subprocess.run(
+                ["git", "-C", clone_dir, "commit", "-m", "esv-shim: snapshot live AM config before restart"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(["git", "-C", clone_dir, "push"], check=True, capture_output=True)
+    finally:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+
+
 def do_restart():
     """
     Real AIC has no separate 'apply' step: a PUT to /environment/{secrets,variables}/{id}
@@ -453,6 +516,11 @@ def do_restart():
     catalina_content = CATALINA_PROPERTIES_BASE + "\n# ESV values injected by esv-shim\n" + esv_lines + "\n"
 
     project_configmap(CATALINA_PROPERTIES_CM, {"catalina.properties": catalina_content})
+
+    try:
+        _mirror_am_to_gitea()
+    except Exception as exc:
+        print(f"WARNING: AM config mirror to Gitea failed: {exc} — proceeding with restart anyway")
 
     restarted = [d for d in RESTART_DEPLOYMENTS if restart_deployment(d)]
 
