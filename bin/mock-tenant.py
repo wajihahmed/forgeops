@@ -842,6 +842,7 @@ def _step_teardown():
 
 
 def cmd_deploy(args):
+    _start = time.monotonic()
     os.chdir(os.path.join(os.path.dirname(__file__), ".."))
     if args.redeploy:
         _step_teardown()
@@ -872,7 +873,9 @@ def cmd_deploy(args):
     # the secret patch from step 11 even if Gitea config was already up to date.
     _push_config(target="all", saas_repo_path=None, force_restart=True)
     _step_print_credentials()
-    print("\n\nDeploy complete ✓")
+    elapsed = time.monotonic() - _start
+    mins, secs = divmod(int(elapsed), 60)
+    print(f"\n\nDeploy complete ✓  ({mins}m {secs}s)")
 
 
 # ---------------------------------------------------------------------------

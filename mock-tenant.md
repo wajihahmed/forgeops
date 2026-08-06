@@ -929,6 +929,25 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **`/admin` URL (IDM Admin UI) is not available** — the IDM Admin UI at `/admin` was deprecated and removed from ForgeOps. Use `/platform` instead.
 
+- **HTTP 500 on `POST /authenticate` — `UnsupportedOperationException: Output callback's value cannot be trusted from input`** *(OPEN — 2026-08-04)*
+
+  **Symptom:** Simulation fails with HTTP 500 on `POST /am/json/realms/root/realms/alpha/authenticate`. Response body is empty (`Content-Length: 0`). AM logs show:
+
+  ```
+  java.lang.UnsupportedOperationException: Output callback's value cannot be trusted from input
+    at RestAuthMetadataCallbackHandler$1.getOutputValue(RestAuthMetadataCallbackHandler.java:66)
+    at RestAuthMetadataCallbackHandler.convertToJson(RestAuthMetadataCallbackHandler.java:41)
+    at IntermediateTreeResult.constructCallbacks(IntermediateTreeResult.java:93)
+  ```
+
+  **Context:** The failing tree is `gd-auth_user_pin_temp` in the alpha realm. Entry node `2ea82d8c` (`gd-auth_user_pin-prep`) → `cacc0ece` (`journey_information`) → `515a45ad` (`DeviceProfileCollectorNode`). The `DeviceProfileCollectorNode` issues a `MetadataCallback` to collect device fingerprint data. AM throws when it tries to serialize the callback for the response.
+
+  **Theory (not yet verified):** Either:
+  1. `/home/forgerock/base/config/services` is being ignored — possibly the base image config is not on the classpath or FBC path, so the `DeviceProfileCollectorNode` type or v1 node config is not being found correctly; or
+  2. The PVC at `/home/forgerock/openam/config/services` is missing the v1 node config for `DeviceProfileCollectorNode` — this was present from Gitea-seed but may not have been imported correctly after recent changes.
+
+  **Recommended next step:** Redeploy from scratch (`python3 bin/mock-tenant.py deploy`) to rule out stale state accumulated across multiple incremental changes. Much has changed since the last clean deploy.
+
 - **`LIBRARY_SCRIPT` NPE when calling `httpClient` — caused by wrong `propertyNamePrefix` and ESV injection mechanism** *(FIXED)*
 
   **Symptom:** `Script '...' with evaluatorVersion 2.0 terminated with exception ... Wrapped java.lang.NullPointerException (library_get_key_pinblock#34)`. Previously also preceded by `WARN: propertyName must start with [script]`.
