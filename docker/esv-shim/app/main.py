@@ -30,6 +30,7 @@ VAR_PREFIX = "esv-var-"
 SECRET_PREFIX = "esv-secret-"
 MAPPING_PREFIX = "esv-mapping-"
 CATALINA_PROPERTIES_CM = "am-catalina-properties"
+IDM_BOOT_PROPERTIES_CM = "idm-boot-properties"
 RESTART_DEPLOYMENTS = ["am", "idm"]
 
 GITEA_CLONE_URL = "http://forgerock:forgerock@gitea.fr-platform.svc.cluster.local:3000/forgerock/customer-config.git"
@@ -150,6 +151,86 @@ slf4j-taglib*.jar
 
 tomcat.util.buf.StringCache.byte.enabled=true
 org.apache.el.GET_CLASSLOADER_USE_PRIVILEGED=false
+"""
+
+# Base boot.properties content — IDM loads this at startup; identityServer.getProperty() resolves against it.
+# ESV values are appended as esv.foo.bar=value entries by do_restart().
+BOOT_PROPERTIES_BASE = """\
+openidm.repo.host=ds-idrepo-0.ds-idrepo
+openidm.repo.port=1636
+openidm.repo.user=uid=admin
+openidm.repo.password=password
+openidm.repo.databaseName=openidm
+openidm.repo.schema=openidm
+
+openidm.anonymous.password=anonymous
+
+openidm.idpconfig.clientsecret=password
+
+userstore.host=ds-idrepo-0.ds-idrepo
+userstore.password=password
+userstore.port=1636
+userstore.basecontext=ou=identities
+
+openidm.port.http=8080
+openidm.port.https=8443
+openidm.port.mutualauth=8444
+
+openidm.lb.port.http=80
+openidm.ln.port.https=443
+openidm.auth.clientauthonlyports=8444
+
+openidm.https.keystore.cert.alias=openidm-localhost
+
+openidm.keystore.type=JCEKS
+openidm.truststore.type=JKS
+openidm.keystore.provider=SunJCE
+openidm.truststore.provider=SUN
+openidm.keystore.location=/var/run/secrets/idm/keystore.jceks
+openidm.truststore.location=/opt/openidm/idmtruststore
+
+openidm.keystore.password=changeit
+openidm.truststore.password=changeit
+
+openidm.prometheus.username=prometheus
+openidm.prometheus.password=prometheus
+openidm.prometheus.role=openidm-prometheus
+
+openidm.servlet.alias=/openidm
+openidm.servlet.upload.alias=/upload
+openidm.servlet.export.alias=/export
+
+openidm.config.crypto.alias=openidm-sym-default
+openidm.script.javascript.debug=transport=socket,suspend=y,address=9888,trace=true
+
+openidm.config.crypto.selfservice.sharedkey.alias=openidm-selfservice-key
+openidm.config.crypto.jwtsession.hmackey.alias=openidm-jwtsessionhmac-key
+openidm.config.crypto.opendj.localhost.cert=server-cert
+
+openidm.ssl.host.aliases=localhost=
+
+openidm.policy.enforcement.enabled=true
+
+openidm.scheduler.execute.persistent.schedules=true
+
+openidm.bonecp.statistics.enabled=false
+
+javascript.exception.debug.info=false
+
+openidm.external.rest.hostnameVerifier=ALLOW_ALL
+
+openidm.cluster.remove.offline.node.state=true
+
+openidm.apidescriptor.enabled=false
+
+openidm.workflow.enabled=true
+
+felix.fileinstall.enableConfigSave=true
+
+com.iplanet.am.cookie.name=iPlanetDirectoryPro
+com.sun.identity.auth.cookieName=AMAuthCookie
+
+rs.client.secret=idm-resource-server
 """
 
 # ESV ids observed in the wild look like "esv-hmac-sha256-key-2" / "esv-error-map".
@@ -513,9 +594,12 @@ def do_restart():
         f"{k}={_escape_properties_value(v)}"
         for k, v in sorted(esv_props.items())
     )
-    catalina_content = CATALINA_PROPERTIES_BASE + "\n# ESV values injected by esv-shim\n" + esv_lines + "\n"
+    esv_comment = "\n# ESV values injected by esv-shim\n"
+    catalina_content = CATALINA_PROPERTIES_BASE + esv_comment + esv_lines + "\n"
+    boot_content = BOOT_PROPERTIES_BASE + esv_comment + esv_lines + "\n"
 
     project_configmap(CATALINA_PROPERTIES_CM, {"catalina.properties": catalina_content})
+    project_configmap(IDM_BOOT_PROPERTIES_CM, {"boot.properties": boot_content})
 
     try:
         _mirror_am_to_gitea()

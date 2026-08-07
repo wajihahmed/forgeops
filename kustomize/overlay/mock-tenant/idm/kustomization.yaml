@@ -5,6 +5,7 @@ components:
 resources:
 - ../../../base/idm/secret-generator
 - idm-fbc-pvc.yaml
+- boot-properties-cm.yaml
 patches:
 - path: deployment.yaml
 - path: fbc-pvc-patch.yaml

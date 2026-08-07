@@ -26,7 +26,15 @@ spec:
         - secretRef:
             name: esv-secrets
             optional: true
+        volumeMounts:
+        - name: idm-boot-properties
+          mountPath: /opt/openidm/resolver/boot.properties
+          subPath: boot.properties
         imagePullPolicy: Always
+      volumes:
+      - name: idm-boot-properties
+        configMap:
+          name: idm-boot-properties
       initContainers:
       - name: custom-vol-init
         image: config-loader:local
