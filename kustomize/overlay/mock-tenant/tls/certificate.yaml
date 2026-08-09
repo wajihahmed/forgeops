@@ -12,6 +12,10 @@ metadata:
   namespace: fr-platform
 spec:
   secretName: platform-tls
+  commonName: mock.iam.example.com
+  subject:
+    organizations:
+      - mock-tenant
   issuerRef:
     name: selfsigned-cluster-issuer
     kind: ClusterIssuer
