@@ -192,6 +192,16 @@ helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --wait
 ```
 
+After installing, enable `configuration-snippet` annotations so the AM/IDM Ingresses can inject the `x-forgerock-transactionid` header:
+```sh
+kubectl patch configmap ingress-nginx-controller -n ingress-nginx \
+  --type merge \
+  -p '{"data":{"allow-snippet-annotations":"true","annotations-risk-level":"Critical"}}'
+kubectl rollout restart daemonset/ingress-nginx-controller -n ingress-nginx
+kubectl rollout status daemonset/ingress-nginx-controller -n ingress-nginx --timeout=90s
+```
+`annotations-risk-level=Critical` is required in ingress-nginx v1.12+ — without it the admission webhook rejects `configuration-snippet` even when `allow-snippet-annotations` is true.
+
 ### 3. mittwald kubernetes-secret-generator
 **Must be running before DS is deployed.** DS reads the `ds-passwords` Secret during first-init to set its admin password. If this operator is absent, the password is empty and cannot be changed without wiping PVCs.
 ```sh
@@ -406,6 +416,26 @@ Strategies:
 - `JSON_REPLACE` — plain `cp` (IDM)
 - `JSON_MERGE` — `jq -s '.[0] * .[1]'` deep-merge per JSON file; non-JSON files copied straight (AM)
 
+#### x-forgerock-transactionid header
+
+Real AIC tenants (via HAProxy or a front-end gateway) inject an `x-forgerock-transactionid` header on every request. This is used for request correlation in AM/IDM audit logs and by lodestar test assertions.
+
+In the mock-tenant, the nginx Ingress controller injects it using a `configuration-snippet` annotation on the AM and IDM Ingress objects:
+
+```nginx
+more_set_headers "x-forgerock-transactionid: $request_id";
+```
+
+`$request_id` is a 32-char hex string generated per request by nginx — unique and suitable for correlation, though not UUID-formatted. The annotation requires two one-time ConfigMap settings on the nginx controller (done as part of `bootstrap`):
+
+```sh
+kubectl patch configmap ingress-nginx-controller -n ingress-nginx \
+  --type merge \
+  -p '{"data":{"allow-snippet-annotations":"true","annotations-risk-level":"Critical"}}'
+```
+
+`annotations-risk-level=Critical` is required from ingress-nginx v1.12+ — without it the admission webhook rejects `configuration-snippet` even when `allow-snippet-annotations` is true.
+
 #### AM service targetPort fix
 
 The base AM Service had `targetPort: https` (port 8081, AM's HTTPS port). nginx was routing to AM's HTTPS port and getting TLS handshake errors. Changed to `targetPort: http` (port 8080).
@@ -471,7 +501,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `docker/config-loader/clone-and-copy.sh` | FBC init container script |
 | `docker/esv-shim/Dockerfile` | ESV shim image (python:3.12-slim + FastAPI + git) |
 | `docker/esv-shim/requirements.txt` | ESV shim Python dependencies |
-| `docker/esv-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM config to Gitea before restart |
+| `docker/esv-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM and IDM config to Gitea before restart |
 | `docker/ds/mock-tenant-config.sh` | Relaxes DS security settings for local dev |
 | `docker/ds/saas-compat-config.sh` | Applies saas-compatible DS settings at build time |
 | `docker/ds/Dockerfile.mock-tenant` | Two-stage DS build: inherits `ds:local-base`; copies mock-tenant runtime-scripts and runs mock-tenant/saas-compat config |
@@ -509,11 +539,11 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `kustomize/overlay/mock-tenant/image-defaulter/kustomization.yaml` | Local image tag mappings (`ds:local`, `config-loader:local`, `esv-shim:local`) |
 | `kustomize/overlay/mock-tenant/am/deployment.yaml` | `custom-vol-init` patch, `CATALINA_USER_OPTS`, `FBC_BASE_PATHS`, envFrom, `postStart` realm hook, `catalina-properties` subPath volume mount |
 | `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` | `am-catalina-properties` ConfigMap — base Tomcat `catalina.properties` + ESV values appended by shim on restart |
-| `kustomize/overlay/mock-tenant/am/ingress-fqdn.yaml` | AM host/TLS → `mock.iam.example.com` |
+| `kustomize/overlay/mock-tenant/am/ingress-fqdn.yaml` | AM host/TLS → `mock.iam.example.com`; injects `x-forgerock-transactionid: $request_id` response header |
 | `kustomize/overlay/mock-tenant/am/service.yaml` | `targetPort: http` (was `https`) |
 | `kustomize/overlay/mock-tenant/amster/amster-job.yaml` | Amster job: SSH key path fix (`id_rsa`) |
 | `kustomize/overlay/mock-tenant/idm/deployment.yaml` | `custom-vol-init` patch, `esv-variables`/`esv-secrets` envFrom |
-| `kustomize/overlay/mock-tenant/idm/ingress-fqdn.yaml` | IDM host/TLS → `mock.iam.example.com` |
+| `kustomize/overlay/mock-tenant/idm/ingress-fqdn.yaml` | IDM host/TLS → `mock.iam.example.com`; injects `x-forgerock-transactionid: $request_id` response header |
 | `kustomize/overlay/mock-tenant/ig/deployment.yaml` | IG imagePullPolicy patch |
 | `kustomize/overlay/mock-tenant/ig/ingress-fqdn.yaml` | IG host/TLS → `mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/admin-ui/ingress-fqdn.yaml` | Admin UI host/TLS → `mock.iam.example.com` |
@@ -724,7 +754,7 @@ POST /environment/restart:
       Patch ConfigMap am-catalina-properties with this content
       AM Deployment mounts am-catalina-properties at /usr/local/tomcat/conf/catalina.properties
       via subPath — Tomcat loads this into JVM system properties at bootstrap
-   3. Mirror live AM config to Gitea (see below)
+   3. Mirror live AM and IDM config to Gitea (see below)
    4. Patch Deployment am and Deployment idm with a
       esv.forgeops/restarted-at: <timestamp> pod-template annotation
       → triggers a rolling restart; new AM pod starts with ESV values in system properties
@@ -735,6 +765,7 @@ POST /environment/restart:
 - **Apply mechanism:** projects all ESV values into `am-catalina-properties` ConfigMap as Java system properties (`esv.foo.bar=value`), then roll-restarts AM/IDM. AM scripts call `systemEnv.getProperty("esv.foo.bar")` which resolves against JVM system properties — Tomcat's `catalina.properties` is the correct injection point, replicating what AIC's `secrets-loader` does.
 - **Why not env vars:** `systemEnv.getProperty()` uses `System.getProperty()` (JVM system properties), not `System.getenv()`. Env var names cannot contain dots on Linux, so `esv-foo-bar` (dashes) cannot be looked up as `esv.foo.bar` (dots). The `catalina.properties` approach handles this correctly and also supports large values (JSON blobs, key pairs) without command-line length limits.
 - **AM config mirror before restart:** `apply-customer-configuration` imports journeys and ESVs into live AM via REST, then calls `POST /environment/restart`. Because AM's `filesystem-init` init container repopulates `/home/forgerock/openam/config/services` from Gitea on every pod boot, any live config not committed to Gitea is lost on restart. To prevent this, `do_restart()` snapshots the live FBC realm directories (`realm/root-alpha`, `realm/root-bravo`) from the AM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `am/services/realm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only so ESV values always take effect even if Gitea is unreachable. This required adding `git` to the shim image and `pods`/`pods/exec` RBAC.
+- **IDM config mirror before restart:** The same root cause applies to IDM — `apply-customer-configuration` PATCHes custom managed objects (`Captcha`, `config_data`, `key_manager`, `service_token_storage`) into live IDM via `PATCH /openidm/config/managed`. Because IDM's `fbc` volume is an emptyDir repopulated from Gitea by `custom-vol-init` on every pod boot, any live IDM config not committed to Gitea is lost on restart. `do_restart()` now also calls `_mirror_idm_to_gitea()` which snapshots `conf/` and `script/` from the IDM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `idm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only (same as AM mirror).
 - **Auth:** none — ClusterIP only, cluster-internal
 - **PUT is an upsert** — `201` if id didn't exist, `200` if it did; no POST-to-create — matches real AIC
 - **`GET /environment/secrets/{_id}` never returns the secret value** — metadata only, matching real AIC (lodestar retrieves clear-text secrets via a separate IDM script-eval endpoint)
