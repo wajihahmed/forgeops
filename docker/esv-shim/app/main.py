@@ -564,6 +564,57 @@ def _mirror_am_to_gitea():
         shutil.rmtree(clone_dir, ignore_errors=True)
 
 
+def _mirror_idm_to_gitea():
+    """
+    Snapshot the live IDM conf/ and script/ directories from the IDM pod and push
+    them to Gitea so that filesystem-init re-populates the correct config on next
+    pod restart. Ensures custom managed objects and endpoints imported live via
+    PATCH /openidm/config/managed survive the restart cycle.
+    """
+    from kubernetes.stream import stream as k8s_stream
+
+    pods = core_v1.list_namespaced_pod(NAMESPACE, label_selector="app=idm").items
+    if not pods:
+        raise RuntimeError("No IDM pod found — cannot mirror config to Gitea")
+    pod_name = pods[0].metadata.name
+
+    resp = k8s_stream(
+        core_v1.connect_get_namespaced_pod_exec,
+        pod_name, NAMESPACE,
+        command=["sh", "-c", "tar -C /opt/openidm -cf - conf script | base64"],
+        stderr=False, stdin=False, stdout=True, tty=False,
+    )
+    tar_bytes = base64.b64decode(resp)
+
+    clone_dir = tempfile.mkdtemp(prefix="esv-shim-idm-mirror-")
+    try:
+        subprocess.run(
+            ["git", "clone", GITEA_CLONE_URL, clone_dir],
+            check=True, capture_output=True,
+        )
+        subprocess.run(["git", "-C", clone_dir, "config", "user.email", "esv-shim@localhost"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone_dir, "config", "user.name", "esv-shim"], check=True, capture_output=True)
+
+        idm_dst = os.path.join(clone_dir, "idm")
+        os.makedirs(idm_dst, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tf:
+            tf.extractall(path=idm_dst)
+
+        subprocess.run(["git", "-C", clone_dir, "add", "idm/"], check=True, capture_output=True)
+        r = subprocess.run(
+            ["git", "-C", clone_dir, "diff", "--cached", "--quiet"],
+            check=False, capture_output=True,
+        )
+        if r.returncode != 0:
+            subprocess.run(
+                ["git", "-C", clone_dir, "commit", "-m", "esv-shim: snapshot live IDM config before restart"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(["git", "-C", clone_dir, "push"], check=True, capture_output=True)
+    finally:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+
+
 def do_restart():
     """
     Real AIC has no separate 'apply' step: a PUT to /environment/{secrets,variables}/{id}
@@ -605,6 +656,11 @@ def do_restart():
         _mirror_am_to_gitea()
     except Exception as exc:
         print(f"WARNING: AM config mirror to Gitea failed: {exc} — proceeding with restart anyway")
+
+    try:
+        _mirror_idm_to_gitea()
+    except Exception as exc:
+        print(f"WARNING: IDM config mirror to Gitea failed: {exc} — proceeding with restart anyway")
 
     restarted = [d for d in RESTART_DEPLOYMENTS if restart_deployment(d)]
 
