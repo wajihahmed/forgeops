@@ -9,3 +9,6 @@
   value: platform-tls
 - op: remove
   path: /spec/rules/0/http/paths/3
+- op: add
+  path: /metadata/annotations/nginx.ingress.kubernetes.io~1configuration-snippet
+  value: "more_set_headers \"x-forgerock-transactionid: $request_id\";"

@@ -7,3 +7,6 @@
 - op: replace
   path: /spec/tls/0/secretName
   value: platform-tls
+- op: add
+  path: /metadata/annotations/nginx.ingress.kubernetes.io~1configuration-snippet
+  value: "more_set_headers \"x-forgerock-transactionid: $request_id\";"
