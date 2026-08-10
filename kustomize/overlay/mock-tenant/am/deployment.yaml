@@ -28,6 +28,8 @@ spec:
         - name: catalina-properties
           mountPath: /usr/local/tomcat/conf/catalina.properties
           subPath: catalina.properties
+        - name: esv-secrets
+          mountPath: /home/forgerock/openam/esv-secrets
         imagePullPolicy: Always
         lifecycle:
           postStart:

@@ -6,8 +6,15 @@ resources:
 - ../../../base/am/secret-generator
 - am-fbc-pvc.yaml
 - catalina-properties-cm.yaml
+- esv-secrets-pvc.yaml
 patches:
 - path: deployment.yaml
+- path: esv-secrets-volume-patch.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: am
 - path: fbc-pvc-patch.yaml
   target:
     group: apps
