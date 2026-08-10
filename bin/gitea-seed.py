@@ -57,7 +57,7 @@ Notes:
     - "remove /objects[/name eq \"foo\"]" ops are skipped if the object is absent.
     - "add /objects/-" ops are skipped if an object with the same name already exists.
     - svcacct's scopes policy references "&{fraas.svcacct.allowed.scopes}" — set this ESV
-      variable via the ESV shim before IDM starts or the policy evaluates against an empty list.
+      variable via the tenant shim before IDM starts or the policy evaluates against an empty list.
 
   merge repo-ds:
     - /ldapConnectionFactories is always skipped — it contains saas-specific hostnames

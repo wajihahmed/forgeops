@@ -4,7 +4,7 @@ mock-tenant.py — CLI for the ForgeOps mock-tenant dev stack.
 
 Commands:
   bootstrap                 Install cluster-wide prerequisites (once per cluster instance)
-  deploy                    Deploy the application stack (AM, IDM, DS, Gitea, ESV shim) — requires bootstrap first
+  deploy                    Deploy the application stack (AM, IDM, DS, Gitea, tenant shim) — requires bootstrap first
   push-config               Push config to Gitea and restart pod(s)
 
 Usage:
@@ -134,7 +134,7 @@ def _gitea_clone_push(clone_work_fn, commit_message):
 
 
 # ---------------------------------------------------------------------------
-# deploy subcommand — application deployment (AM, IDM, DS, Gitea, ESV shim)
+# deploy subcommand — application deployment (AM, IDM, DS, Gitea, tenant shim)
 # Requires bootstrap to have been run first on the cluster.
 # ---------------------------------------------------------------------------
 
@@ -194,23 +194,23 @@ def _step_prerequisites():
 
 
 def _step_build_images():
-    step(1, "Build config-loader, esv-shim, and ds images")
+    step(1, "Build config-loader, tenant-shim, and ds images")
 
     r = run("docker context ls --format '{{.Name}} {{.Current}}'", capture=True)
     active = next((l.split()[0] for l in r.stdout.splitlines() if "true" in l.lower()), "")
     ctx = f"docker --context {K8S_CONTEXT}" if active != K8S_CONTEXT else "docker"
 
     for tag, path, dockerfile in [
-        ("config-loader:local", "docker/config-loader/", None),
-        ("esv-shim:local",      "docker/esv-shim/",      None),
-        ("ds:local-base",       "docker/ds/",            None),
-        ("ds:local",            "docker/ds/",            "Dockerfile.mock-tenant"),
+        ("config-loader:local",  "docker/config-loader/", None),
+        ("tenant-shim:local",    "docker/tenant-shim/",   None),
+        ("ds:local-base",        "docker/ds/",            None),
+        ("ds:local",             "docker/ds/",            "Dockerfile.mock-tenant"),
     ]:
         print(f"  Building {tag}...")
         df_flag = f"-f {path}{dockerfile} " if dockerfile else ""
         run(f"{ctx} build {df_flag}-t {tag} {path}", timeout=300)
 
-    run(f"{ctx} images --format 'table {{{{.Repository}}}}\\t{{{{.Tag}}}}' | grep -E 'config-loader|esv-shim|^ds'")
+    run(f"{ctx} images --format 'table {{{{.Repository}}}}\\t{{{{.Tag}}}}' | grep -E 'config-loader|tenant-shim|^ds'")
 
 
 def _step_create_namespace():
@@ -238,10 +238,10 @@ def _step_seed_customer_config():
     print("  Seeding complete ✓")
 
 
-def _step_deploy_esv_shim():
-    step(5, "Deploy ESV shim")
-    kubectl("apply -k kustomize/overlay/mock-tenant/esv-shim/")
-    kubectl(f"rollout status deployment/esv-shim -n {NAMESPACE} --timeout=60s", timeout=70)
+def _step_deploy_tenant_shim():
+    step(5, "Deploy tenant shim")
+    kubectl("apply -k kustomize/overlay/mock-tenant/tenant-shim/")
+    kubectl(f"rollout status deployment/tenant-shim -n {NAMESPACE} --timeout=60s", timeout=70)
 
 
 def _step_deploy_ds():
@@ -905,7 +905,7 @@ def cmd_deploy(args):
     _step_create_namespace()
     _step_deploy_gitea()
     _step_seed_customer_config()
-    _step_deploy_esv_shim()
+    _step_deploy_tenant_shim()
     _step_deploy_ds()
     _step_deploy_keystore()
     _step_deploy_tls()
@@ -1103,7 +1103,7 @@ def main():
     sub.add_parser("bootstrap", help="Install cluster-wide prerequisites (once per cluster instance)")
 
     # deploy
-    deploy_p = sub.add_parser("deploy", help="Deploy the application stack (AM, IDM, DS, Gitea, ESV shim) — run bootstrap first")
+    deploy_p = sub.add_parser("deploy", help="Deploy the application stack (AM, IDM, DS, Gitea, tenant shim) — run bootstrap first")
     deploy_p.add_argument(
         "--force",
         action="store_true",

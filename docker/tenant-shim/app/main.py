@@ -248,7 +248,7 @@ core_v1 = client.CoreV1Api()
 apps_v1 = client.AppsV1Api()
 
 app = FastAPI(
-    title="ESV Shim",
+    title="Tenant Shim",
     description="AIC ESV-compatible API (PUT-upsert, valueBase64 wire format) backed by "
     "Kubernetes ConfigMaps/Secrets",
 )
@@ -309,7 +309,7 @@ def configmap_to_variable(cm) -> dict:
         "description": annotations.get(DESC_ANNOTATION, ""),
         "expressionType": annotations.get(EXPRESSION_TYPE_ANNOTATION, "string"),
         "lastChangeDate": annotations.get(UPDATED_ANNOTATION),
-        "lastChangedBy": "esv-shim",
+        "lastChangedBy": "tenant-shim",
         "loaded": True,
     }
 
@@ -325,7 +325,7 @@ def secret_to_metadata(secret) -> dict:
         "encoding": annotations.get(ENCODING_ANNOTATION, "generic"),
         "useInPlaceholders": annotations.get(USE_IN_PLACEHOLDERS_ANNOTATION, "true") == "true",
         "lastChangeDate": annotations.get(UPDATED_ANNOTATION),
-        "lastChangedBy": "esv-shim",
+        "lastChangedBy": "tenant-shim",
         "loaded": True,
     }
 
@@ -583,14 +583,14 @@ def _mirror_am_to_gitea():
     )
     tar_bytes = base64.b64decode(resp)
 
-    clone_dir = tempfile.mkdtemp(prefix="esv-shim-mirror-")
+    clone_dir = tempfile.mkdtemp(prefix="tenant-shim-mirror-")
     try:
         subprocess.run(
             ["git", "clone", GITEA_CLONE_URL, clone_dir],
             check=True, capture_output=True,
         )
-        subprocess.run(["git", "-C", clone_dir, "config", "user.email", "esv-shim@localhost"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", clone_dir, "config", "user.name", "esv-shim"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone_dir, "config", "user.email", "tenant-shim@localhost"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone_dir, "config", "user.name", "tenant-shim"], check=True, capture_output=True)
 
         am_services_dst = os.path.join(clone_dir, "am", "services")
         os.makedirs(am_services_dst, exist_ok=True)
@@ -604,7 +604,7 @@ def _mirror_am_to_gitea():
         )
         if r.returncode != 0:
             subprocess.run(
-                ["git", "-C", clone_dir, "commit", "-m", "esv-shim: snapshot live AM config before restart"],
+                ["git", "-C", clone_dir, "commit", "-m", "tenant-shim: snapshot live AM config before restart"],
                 check=True, capture_output=True,
             )
             subprocess.run(["git", "-C", clone_dir, "push"], check=True, capture_output=True)
@@ -634,14 +634,14 @@ def _mirror_idm_to_gitea():
     )
     tar_bytes = base64.b64decode(resp)
 
-    clone_dir = tempfile.mkdtemp(prefix="esv-shim-idm-mirror-")
+    clone_dir = tempfile.mkdtemp(prefix="tenant-shim-idm-mirror-")
     try:
         subprocess.run(
             ["git", "clone", GITEA_CLONE_URL, clone_dir],
             check=True, capture_output=True,
         )
-        subprocess.run(["git", "-C", clone_dir, "config", "user.email", "esv-shim@localhost"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", clone_dir, "config", "user.name", "esv-shim"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone_dir, "config", "user.email", "tenant-shim@localhost"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", clone_dir, "config", "user.name", "tenant-shim"], check=True, capture_output=True)
 
         idm_dst = os.path.join(clone_dir, "idm")
         os.makedirs(idm_dst, exist_ok=True)
@@ -655,7 +655,7 @@ def _mirror_idm_to_gitea():
         )
         if r.returncode != 0:
             subprocess.run(
-                ["git", "-C", clone_dir, "commit", "-m", "esv-shim: snapshot live IDM config before restart"],
+                ["git", "-C", clone_dir, "commit", "-m", "tenant-shim: snapshot live IDM config before restart"],
                 check=True, capture_output=True,
             )
             subprocess.run(["git", "-C", clone_dir, "push"], check=True, capture_output=True)
@@ -693,7 +693,7 @@ def do_restart():
         f"{k}={_escape_properties_value(v)}"
         for k, v in sorted(esv_props.items())
     )
-    esv_comment = "\n# ESV values injected by esv-shim\n"
+    esv_comment = "\n# ESV values injected by tenant-shim\n"
     catalina_content = CATALINA_PROPERTIES_BASE + esv_comment + esv_lines + "\n"
     boot_content = BOOT_PROPERTIES_BASE + esv_comment + esv_lines + "\n"
 

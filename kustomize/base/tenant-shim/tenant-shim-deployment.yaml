@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: esv-shim
+  name: tenant-shim
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: esv-shim
+      app: tenant-shim
   template:
     metadata:
       labels:
-        app: esv-shim
+        app: tenant-shim
     spec:
-      serviceAccountName: esv-shim
+      serviceAccountName: tenant-shim
       containers:
-        - name: esv-shim
-          image: esv-shim
+        - name: tenant-shim
+          image: tenant-shim
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

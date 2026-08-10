@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: esv-shim
+  name: tenant-shim
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
@@ -18,20 +18,20 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: esv-shim
+                name: tenant-shim
                 port:
                   number: 8080
           - path: /am/json/realms/root/realms/alpha/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider
             pathType: Prefix
             backend:
               service:
-                name: esv-shim
+                name: tenant-shim
                 port:
                   number: 8080
           - path: /am/json/realms/root/realms/bravo/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider
             pathType: Prefix
             backend:
               service:
-                name: esv-shim
+                name: tenant-shim
                 port:
                   number: 8080

@@ -3,12 +3,12 @@ kind: Kustomization
 components:
 - ../image-defaulter
 resources:
-- ../../../base/esv-shim
+- ../../../base/tenant-shim
 patches:
 - path: ingress-fqdn.yaml
   target:
     group: networking.k8s.io
     version: v1
     kind: Ingress
-    name: esv-shim
+    name: tenant-shim
 namespace: fr-platform

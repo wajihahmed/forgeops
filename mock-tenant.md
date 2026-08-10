@@ -15,7 +15,7 @@ This document is the single authoritative reference for the **ForgeOps FBC (File
 7. [Implementation Section](#implementation-section)
 8. [AM Tree Config for Alpha/Bravo Realms](#am-tree-config-for-alphabravo-realms)
 9. [SaaS Sync — Planned Work](#saas-sync--planned-work)
-10. [ESV Shim](#esv-shim)
+10. [Tenant Shim](#tenant-shim)
 11. [Operational Runbook](#operational-runbook)
 12. [Known Issues & Gotchas](#known-issues--gotchas)
 13. [TODO](#todo)
@@ -28,9 +28,9 @@ This is a fork of [ForgeOps](https://github.com/ForgeRock/forgeops) — the open
 
 - **File Based Configuration (FBC)**: AM and IDM load their configuration from a Gitea git repository at pod startup, not from config baked into the Docker image.
 - **Alpha/bravo realms**: Pre-configured via FBC with Login trees, identity stores, and OAuth2 clients that match AIC's multi-realm model.
-- **ESV shim**: A FastAPI service that emulates AIC's Environment Secrets & Variables REST API, enabling unmodified lodestar tooling to configure the local tenant.
+- **Tenant shim**: A FastAPI service that emulates AIC's Environment Secrets & Variables REST API and other AIC-specific endpoints, enabling unmodified lodestar tooling to configure the local tenant.
 - **SaaS-compatible DS**: Custom schema, indexes, and security settings sourced from the production saas repo.
-- **`mock-tenant.py`**: A single automation script (`bin/mock-tenant.py`) with three subcommands: `bootstrap` installs cluster-wide prerequisites (once per OrbStack instance); `deploy` deploys the application stack (AM, IDM, DS, Gitea, ESV shim); `push-config` pushes updated config to Gitea and restarts the relevant pod.
+- **`mock-tenant.py`**: A single automation script (`bin/mock-tenant.py`) with three subcommands: `bootstrap` installs cluster-wide prerequisites (once per OrbStack instance); `deploy` deploys the application stack (AM, IDM, DS, Gitea, tenant shim); `push-config` pushes updated config to Gitea and restarts the relevant pod.
 - **`gitea-seed.py`**: A utility script (`bin/gitea-seed.py`) with two roles: (1) `am-mirror` — mirrors the live AM root realm's tree/node config into Gitea-ready FBC files for the alpha/bravo realms; (2) `merge <managed|repo-ds|access>` subcommands — merges IDM config files from the saas repo into the ForgeOps-compatible static files committed under `kustomize/base/gitea-seed/idm-conf/`.
 - **`tunnel`**: A helper script (`bin/tunnel`) that port-forwards the nginx ingress controller's port 443 to localhost:443 (requires `sudo`), enabling browser access to `https://mock.iam.example.com` from your laptop/desktop.
 
@@ -134,7 +134,7 @@ OrbStack (local k8s)
     ├── ds-idrepo       — DS (identity + IDM repo store), customised schema/indexes
     ├── ds-cts          — DS (CTS session store)
     ├── gitea           — In-cluster git server (customer-config repo)
-    ├── esv-shim        — AIC ESV API emulator (FastAPI)
+    ├── tenant-shim     — AIC ESV API emulator + stub endpoints (FastAPI)
     ├── admin-ui        — ForgeRock Admin UI
     ├── login-ui        — Platform Login UI
     ├── end-user-ui     — End User UI
@@ -257,7 +257,7 @@ Add to `/etc/hosts`:
 
 ## Deploy Guide
 
-`deploy` deploys the **application stack** — AM, IDM, DS, Gitea, ESV shim, and supporting resources. It assumes `bootstrap` has already been run on the cluster.
+`deploy` deploys the **application stack** — AM, IDM, DS, Gitea, tenant shim, and supporting resources. It assumes `bootstrap` has already been run on the cluster.
 
 **Always use `mock-tenant.py` to deploy. Never use manual kubectl/forgeops steps.**
 
@@ -271,12 +271,12 @@ This runs all steps in the correct order. Individual steps can be run in isolati
 
 Steps are numbered 0–15 internally. Key ordering constraints:
 
-1. **Build images** — `config-loader:local`, `esv-shim:local`, `ds:local` built against the OrbStack docker context. `ds:local` is required because `image-defaulter` maps `ds` to a local tag for the security-settings customisation.
+1. **Build images** — `config-loader:local`, `tenant-shim:local`, `ds:local` built against the OrbStack docker context. `ds:local` is required because `image-defaulter` maps `ds` to a local tag for the security-settings customisation.
 
    ```sh
    # Manual equivalent (if needed):
    docker --context orbstack build -t config-loader:local docker/config-loader/
-   docker --context orbstack build -t esv-shim:local docker/esv-shim/
+   docker --context orbstack build -t tenant-shim:local docker/tenant-shim/
    docker --context orbstack build -t ds:local docker/ds/
    ```
 
@@ -287,7 +287,7 @@ Steps are numbered 0–15 internally. Key ordering constraints:
 4. **Seed customer-config repo** — `kubectl apply -k kustomize/overlay/mock-tenant/gitea-seed/ --server-side`
    Uses `--server-side` apply because `managed.json` (323KB) exceeds the 262KB annotation limit.
 
-5. **Deploy ESV shim** — `kubectl apply -k kustomize/overlay/mock-tenant/esv-shim/`
+5. **Deploy tenant shim** — `kubectl apply -k kustomize/overlay/mock-tenant/tenant-shim/`
 
 6. **Deploy DS and secrets** — `bin/forgeops apply -e mock-tenant -n fr-platform base ds-cts ds-idrepo`
    Then waits for `ds-set-passwords` Job to complete.
@@ -307,7 +307,7 @@ Steps are numbered 0–15 internally. Key ordering constraints:
     This is the local equivalent of the `GoogleSecretManagerSecretStoreProvider/ESV` store that AIC pre-wires to Google Secret Manager.
     AM's httpclient mTLS cert resolution (`mtlsClientCertSecretPurpose`) reads from this store.
     Idempotent: skips if the store already exists.
-    **Note:** the `esv-secrets/` directory itself does NOT exist after this step — it is created lazily by `_write_pem_secrets_to_am()` in the esv-shim on the first `POST /environment/restart` that has PEM-encoded secrets to write (i.e. after `apply-customer-configuration` runs). The store registration and the directory creation are intentionally separate steps.
+    **Note:** the `esv-secrets/` directory itself does NOT exist after this step — it is created lazily by `_write_pem_secrets_to_am()` in the tenant-shim on the first `POST /environment/restart` that has PEM-encoded secrets to write (i.e. after `apply-customer-configuration` runs). The store registration and the directory creation are intentionally separate steps.
 
 11. **Deploy amster and fix OAuth2 client secrets** — `bin/forgeops apply -e mock-tenant -n fr-platform amster`
 
@@ -507,9 +507,9 @@ Single Gitea pod. Key implementation details:
 - Admin user created via `lifecycle.postStart` hook as `su git -c 'gitea admin user create ...'` — `DEFAULT_ADMIN_*` env vars do NOT work in gitea:1.22
 - Seed Job uses `curl -u user:pass` (not `wget` — Alpine BusyBox wget lacks `--user`/`--password`) and `alpine:3.19` image (not `alpine/git` which has git as its ENTRYPOINT)
 
-#### ESV shim
+#### Tenant shim
 
-FastAPI service that emulates AIC's Environment Secrets & Variables REST API. See [ESV Shim](#esv-shim) for architecture, API surface, RBAC, and verification steps.
+FastAPI service that emulates AIC's Environment Secrets & Variables REST API and other AIC-specific endpoints. See [Tenant Shim](#tenant-shim) for architecture, API surface, RBAC, and verification steps.
 
 ### Files Table
 
@@ -521,9 +521,9 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 |---|---|
 | `docker/config-loader/Dockerfile` | config-loader image (Alpine + git + jq) |
 | `docker/config-loader/clone-and-copy.sh` | FBC init container script |
-| `docker/esv-shim/Dockerfile` | ESV shim image (python:3.12-slim + FastAPI + git) |
-| `docker/esv-shim/requirements.txt` | ESV shim Python dependencies |
-| `docker/esv-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM and IDM config to Gitea before restart |
+| `docker/tenant-shim/Dockerfile` | Tenant shim image (python:3.12-slim + FastAPI + git) |
+| `docker/tenant-shim/requirements.txt` | Tenant shim Python dependencies |
+| `docker/tenant-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM and IDM config to Gitea before restart |
 | `docker/ds/mock-tenant-config.sh` | Relaxes DS security settings for local dev |
 | `docker/ds/saas-compat-config.sh` | Applies saas-compatible DS settings at build time |
 | `docker/ds/Dockerfile.mock-tenant` | Two-stage DS build: inherits `ds:local-base`; copies mock-tenant runtime-scripts and runs mock-tenant/saas-compat config |
@@ -532,7 +532,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `docker/ds/runtime-scripts-mock-tenant/ds-idrepo/post-init` | Grants `unindexed-search` privilege to `am-identity-bind-account` |
 | `docker/ds/ldif-ext/identities/mock-tenant-orgs.ldif` | Extra LDAP entries: `ou=svcaccts`, `ou=user`, `ou=organization`, `ou=application` for alpha/bravo |
 | `docker/ds/config/schema-mock-tenant/99-fraas-schema.ldif` | FRaaS custom LDAP schema (copied from saas `FRAAS/repo` setup-profile; staged separately so it loads after `idm-repo` defines `fr-idm-uuid` — see SaaS Sync Part 1) |
-| `docker/mock-tenant-bake.hcl` | Bake overlay: adds `config-loader` and `esv-shim` targets; compose with `docker-bake.hcl` |
+| `docker/mock-tenant-bake.hcl` | Bake overlay: adds `config-loader` and `tenant-shim` targets; compose with `docker-bake.hcl` |
 
 **Kustomize — base**
 
@@ -544,13 +544,13 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `kustomize/base/gitea-seed/idm-conf/repo.ds.json` | Merged IDM DS repo mappings |
 | `kustomize/base/gitea-seed/idm-conf/access.json` | IDM access policy |
 | `kustomize/base/gitea-seed/idm-script/teammember.js` | IDM teammember script |
-| `kustomize/base/esv-shim/kustomization.yaml` | ESV shim base kustomization |
-| `kustomize/base/esv-shim/esv-shim-deployment.yaml` | ESV shim Deployment |
-| `kustomize/base/esv-shim/esv-shim-ingress.yaml` | ESV shim Ingress |
-| `kustomize/base/esv-shim/esv-shim-service.yaml` | ESV shim Service (ClusterIP, port 8080) |
-| `kustomize/base/esv-shim/esv-shim-rbac.yaml` | ESV shim ServiceAccount + Role + RoleBinding (pods + pods/exec added for AM config mirror) |
-| `kustomize/base/esv-shim/esv-projection-configmap.yaml` | Empty `esv-variables` ConfigMap (pre-created) |
-| `kustomize/base/esv-shim/esv-projection-secret.yaml` | Empty `esv-secrets` Secret (pre-created) |
+| `kustomize/base/tenant-shim/kustomization.yaml` | Tenant shim base kustomization |
+| `kustomize/base/tenant-shim/tenant-shim-deployment.yaml` | Tenant shim Deployment |
+| `kustomize/base/tenant-shim/tenant-shim-ingress.yaml` | Tenant shim Ingress |
+| `kustomize/base/tenant-shim/tenant-shim-service.yaml` | Tenant shim Service (ClusterIP, port 8080) |
+| `kustomize/base/tenant-shim/tenant-shim-rbac.yaml` | Tenant shim ServiceAccount + Role + RoleBinding (pods + pods/exec added for AM config mirror) |
+| `kustomize/base/tenant-shim/esv-projection-configmap.yaml` | Empty `esv-variables` ConfigMap (pre-created) |
+| `kustomize/base/tenant-shim/esv-projection-secret.yaml` | Empty `esv-secrets` Secret (pre-created) |
 
 **Kustomize — overlay/mock-tenant**
 
@@ -558,7 +558,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 |---|---|
 | `kustomize/overlay/mock-tenant/kustomization.yaml` | Top-level overlay kustomization |
 | `kustomize/overlay/mock-tenant/base/platform-config.yaml` | `FQDN` + `AM_SERVER_FQDN: mock.iam.example.com` |
-| `kustomize/overlay/mock-tenant/image-defaulter/kustomization.yaml` | Local image tag mappings (`ds:local`, `config-loader:local`, `esv-shim:local`) |
+| `kustomize/overlay/mock-tenant/image-defaulter/kustomization.yaml` | Local image tag mappings (`ds:local`, `config-loader:local`, `tenant-shim:local`) |
 | `kustomize/overlay/mock-tenant/am/deployment.yaml` | `custom-vol-init` patch, `CATALINA_USER_OPTS`, `FBC_BASE_PATHS`, envFrom, `postStart` realm hook, `catalina-properties` subPath volume mount |
 | `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` | `am-catalina-properties` ConfigMap — base Tomcat `catalina.properties` + ESV values appended by shim on restart |
 | `kustomize/overlay/mock-tenant/am/ingress-fqdn.yaml` | AM host/TLS → `mock.iam.example.com`; injects `x-forgerock-transactionid: $request_id` response header |
@@ -580,7 +580,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API. Se
 | `kustomize/overlay/mock-tenant/ds-cts/sts.yaml` | `storageClassName: local-path`; `imagePullPolicy: IfNotPresent` |
 | `kustomize/overlay/mock-tenant/ds-cts/snapshot-schedule.yaml` | DS CTS snapshot schedule |
 | `kustomize/overlay/mock-tenant/ds-snapshot/` | DS snapshot RBAC + ConfigMap overlay |
-| `kustomize/overlay/mock-tenant/esv-shim/ingress-fqdn.yaml` | ESV shim host/TLS → `mock.iam.example.com` |
+| `kustomize/overlay/mock-tenant/tenant-shim/ingress-fqdn.yaml` | Tenant shim host/TLS → `mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/gitea/` | Gitea overlay (namespace) |
 | `kustomize/overlay/mock-tenant/gitea-seed/` | Gitea seed Job overlay |
 
@@ -662,7 +662,7 @@ Without it, those nodes fail:
 ### AIC JVM Flag: `-Dcom.forgerock.am.enable_cloud_only_features=true`
 
 Present in AIC production JVM args (confirmed from `/Users/minikube/FRaaS/prf-e2e-ame-34937-2/fbc/am/jvm.txt`). Enables:
-- `/environment` REST API (ESV endpoints) — without this flag those endpoints return 404 on ForgeOps AM. Our ESV shim handles this separately, so this flag is NOT currently needed.
+- `/environment` REST API (ESV endpoints) — without this flag those endpoints return 404 on ForgeOps AM. Our tenant shim handles this separately, so this flag is NOT currently needed.
 - Tenant management APIs — cloud-tier admin endpoints not in the open-source build.
 - Cloud-specific OAuth2/OIDC behaviors.
 
@@ -747,9 +747,9 @@ curl -sk "https://mock.iam.example.com/openidm/managed/teammember?_queryFilter=t
 
 ---
 
-## ESV Shim
+## Tenant Shim
 
-A FastAPI service that emulates AIC's Environment Secrets & Variables (ESV) REST API, enabling unmodified lodestar tooling (`tenant_util.py esv import --apply`) to configure the local tenant.
+A FastAPI service that emulates AIC's Environment Secrets & Variables (ESV) REST API and other AIC-specific endpoints, enabling unmodified lodestar tooling (`tenant_util.py esv import --apply`) to configure the local tenant.
 
 ### Architecture
 
@@ -757,7 +757,7 @@ A FastAPI service that emulates AIC's Environment Secrets & Variables (ESV) REST
 Client (curl / lodestar tenant_util.py)
    │  HTTP :8080
    ▼
-esv-shim (FastAPI, Deployment+Service in fr-platform)
+tenant-shim (FastAPI, Deployment+Service in fr-platform)
    │  uses Kubernetes Python client (in-cluster ServiceAccount token)
    ▼
 Per-item objects (source of truth, PUT-upsert target):
@@ -799,16 +799,16 @@ POST /environment/restart — execution order:
       Patch ConfigMaps am-catalina-properties and idm-boot-properties.
       (These are ConfigMap volume mounts — picked up at next pod start, no exec needed.)
    3. Mirror live AM FBC (realm/root-alpha, realm/root-bravo) to Gitea — so journeys/nodes
-      imported live survive the restart. Written by: esv-shim via kubectl exec tar|base64.
+      imported live survive the restart. Written by: tenant-shim via kubectl exec tar|base64.
    4. Mirror live IDM conf/ and script/ to Gitea — so managed objects imported live survive
-      the restart. Written by: esv-shim via kubectl exec tar|base64.
+      the restart. Written by: tenant-shim via kubectl exec tar|base64.
    5. Patch Deployment am and Deployment idm with esv.forgeops/restarted-at annotation
       → triggers rolling restart. New AM pod starts: custom-vol-init clones Gitea (steps 3+4
       content now in Gitea) → filesystem-init overlays → AM starts with updated FBC and ESV
       scalar values from catalina.properties.
    6. Wait for AM rollout to complete (_wait_for_rollout polls apps_v1 until all replicas ready).
    7. Write PEM files to AM pod via kubectl exec — AFTER custom-vol-init has finished and the
-      directory is stable. Written by: esv-shim to /home/forgerock/openam/config/services/esv-secrets/
+      directory is stable. Written by: tenant-shim to /home/forgerock/openam/config/services/esv-secrets/
       on the am-fbc PVC. These files persist for the lifetime of the pod and are read on demand
       by AM's FileSystemSecretStore/ESV when an httpclient mTLS cert is needed.
 
@@ -823,9 +823,9 @@ PUT /am/json/realms/root/realms/{realm}/realm-config/secrets/stores/
 - **Storage:** one Kubernetes object per ESV item (`esv-var-<id>` ConfigMap, `esv-secret-<id>` Secret) — trivial CRUD, per-item metadata via annotations
 - **Apply mechanism:** projects all ESV values into `am-catalina-properties` ConfigMap as Java system properties (`esv.foo.bar=value`), then roll-restarts AM/IDM. AM scripts call `systemEnv.getProperty("esv.foo.bar")` which resolves against JVM system properties — Tomcat's `catalina.properties` is the correct injection point, replicating what AIC's `secrets-loader` does.
 - **Why not env vars:** `systemEnv.getProperty()` uses `System.getProperty()` (JVM system properties), not `System.getenv()`. Env var names cannot contain dots on Linux, so `esv-foo-bar` (dashes) cannot be looked up as `esv.foo.bar` (dots). The `catalina.properties` approach handles this correctly and also supports large values (JSON blobs, key pairs) without command-line length limits.
-- **AM config mirror before restart:** `apply-customer-configuration` imports journeys and ESVs into live AM via REST, then calls `POST /environment/restart`. Because AM's `filesystem-init` init container repopulates `/home/forgerock/openam/config/services` from Gitea on every pod boot, any live config not committed to Gitea is lost on restart. To prevent this, `do_restart()` snapshots the live FBC realm directories (`realm/root-alpha`, `realm/root-bravo`) from the AM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `am/services/realm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only so ESV values always take effect even if Gitea is unreachable. This required adding `git` to the shim image and `pods`/`pods/exec` RBAC.
+- **AM config mirror before restart:** `apply-customer-configuration` imports journeys and ESVs into live AM via REST, then calls `POST /environment/restart`. Because AM's `filesystem-init` init container repopulates `/home/forgerock/openam/config/services` from Gitea on every pod boot, any live config not committed to Gitea is lost on restart. To prevent this, `do_restart()` snapshots the live FBC realm directories (`realm/root-alpha`, `realm/root-bravo`) from the AM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `am/services/realm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only so ESV values always take effect even if Gitea is unreachable. This required adding `git` to the tenant-shim image and `pods`/`pods/exec` RBAC.
 - **mTLS cert loading via FileSystemSecretStore:** On real AIC, AM resolves httpclient `mtlsClientCertSecretPurpose` through a `GoogleSecretManagerSecretStoreProvider/ESV` store instance pre-wired by the platform to Google Secret Manager. Locally this store instance doesn't exist, so AM presents no client cert and the mTLS handshake fails with 403. The fix is three-part: (1) `mock-tenant.py` step 10b creates a `FileSystemSecretStore/ESV` instance in AM at deploy time, pointing at `/home/forgerock/openam/config/services/esv-secrets/` on the FBC PVC — the directory does not yet exist at this point; (2) `do_restart()` creates the directory via `kubectl exec mkdir -p` and writes every PEM-encoded ESV secret (those with `esv.forgeops/encoding: pem` annotation) as a file into it — the filename is the k8s Secret name minus the `esv-secret-` prefix — this happens on the first `POST /environment/restart` after `apply-customer-configuration` has imported the PEM secrets; (3) when lodestar PUTs a secret-store mapping targeting `GoogleSecretManagerSecretStoreProvider/ESV`, the shim intercepts it, stores it in a ConfigMap as before, and also forwards it to AM's `FileSystemSecretStore/ESV` via the AM internal REST API — so AM knows which file to load for which purpose. No new PVC or volume mounts are needed: the files go onto the existing `am-fbc` PVC which already backs `/home/forgerock/openam/config/services/`.
-- **IDM config mirror before restart:** The same root cause applies to IDM — `apply-customer-configuration` PATCHes custom managed objects (`Captcha`, `config_data`, `key_manager`, `service_token_storage`) into live IDM via `PATCH /openidm/config/managed`. Because IDM's `fbc` volume is an emptyDir repopulated from Gitea by `custom-vol-init` on every pod boot, any live IDM config not committed to Gitea is lost on restart. `do_restart()` now also calls `_mirror_idm_to_gitea()` which snapshots `conf/` and `script/` from the IDM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `idm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only (same as AM mirror).
+- **IDM config mirror before restart:** The same root cause applies to IDM — `apply-customer-configuration` PATCHes custom managed objects (`Captcha`, `config_data`, `key_manager`, `service_token_storage`) into live IDM via `PATCH /openidm/config/managed`. Because IDM's `fbc` volume is an emptyDir repopulated from Gitea by `custom-vol-init` on every pod boot, any live IDM config not committed to Gitea is lost on restart. `do_restart()` now also calls `_mirror_idm_to_gitea()` which snapshots `conf/` and `script/` from the IDM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `idm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only (same as AM mirror). This required adding `git` to the tenant-shim image.
 - **Auth:** none — ClusterIP only, cluster-internal
 - **PUT is an upsert** — `201` if id didn't exist, `200` if it did; no POST-to-create — matches real AIC
 - **`GET /environment/secrets/{_id}` never returns the secret value** — metadata only, matching real AIC (lodestar retrieves clear-text secrets via a separate IDM script-eval endpoint)
@@ -852,7 +852,7 @@ Wire-format compatible with real AIC, verified by running lodestar's `tenant_uti
 
 ### RBAC
 
-Namespaced `Role` (not `ClusterRole` — shim only touches `fr-platform`), bound to a dedicated `esv-shim` ServiceAccount:
+Namespaced `Role` (not `ClusterRole` — shim only touches `fr-platform`), bound to a dedicated `tenant-shim` ServiceAccount:
 
 ```yaml
 rules:
@@ -874,7 +874,7 @@ rules:
 
 ```sh
 # Port-forward the shim
-kubectl port-forward -n fr-platform svc/esv-shim 8090:8080
+kubectl port-forward -n fr-platform svc/tenant-shim 8090:8080
 
 # Import a real ESV export using lodestar's CLI (strongest check):
 echo "faketoken" > /tmp/at.txt
@@ -895,8 +895,8 @@ kubectl exec -n fr-platform deploy/am -- grep "esv\." /usr/local/tomcat/conf/cat
 ```
 
 **Important gotchas:**
-- ESV shim changes require `POST /environment/restart` to take effect — writes to per-item objects are immediate and durable, but AM reads ESVs from `catalina.properties` which is only updated and loaded at pod startup; `/environment/restart` re-projects into `am-catalina-properties` and triggers the rolling restart
-- `docker build` for `esv-shim:local` must target the OrbStack docker context — see [Known Issues](#known-issues--gotchas)
+- Tenant shim changes require `POST /environment/restart` to take effect — writes to per-item objects are immediate and durable, but AM reads ESVs from `catalina.properties` which is only updated and loaded at pod startup; `/environment/restart` re-projects into `am-catalina-properties` and triggers the rolling restart
+- `docker build` for `tenant-shim:local` must target the OrbStack docker context — see [Known Issues](#known-issues--gotchas)
 
 ---
 
@@ -1064,13 +1064,13 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
   2. **`systemEnv.getProperty()` still returned `null` even after prefix fix** — because ESV values were injected as env vars (`esv-service-keys-pinblock-url` with dashes) via `envFrom`, but `systemEnv.getProperty("esv.service.keys.pinblock.url")` resolves against **JVM system properties** (not env vars). Dots and dashes are not interchangeable — `System.getenv("esv.service.keys.pinblock.url")` returns null on Linux because dots are not valid in env var names. (In AIC, `secrets-loader` materialises ESVs into a properties file that is loaded as system properties at AM startup.)
 
-     Fix: the ESV shim's `do_restart()` now writes all ESV values into the `am-catalina-properties` ConfigMap as `esv.foo.bar=value` entries (translating `esv-foo-bar` key names, escaping values for Java `.properties` format to handle large values like JSON blobs and key pairs). The AM Deployment mounts this ConfigMap at `/usr/local/tomcat/conf/catalina.properties` via `subPath`. Tomcat loads `catalina.properties` into JVM system properties at bootstrap — making all ESV values available to `systemEnv.getProperty()` under the correct dot-notation keys.
+     Fix: the tenant shim's `do_restart()` now writes all ESV values into the `am-catalina-properties` ConfigMap as `esv.foo.bar=value` entries (translating `esv-foo-bar` key names, escaping values for Java `.properties` format to handle large values like JSON blobs and key pairs). The AM Deployment mounts this ConfigMap at `/usr/local/tomcat/conf/catalina.properties` via `subPath`. Tomcat loads `catalina.properties` into JVM system properties at bootstrap — making all ESV values available to `systemEnv.getProperty()` under the correct dot-notation keys.
 
   **Files changed:**
   - `kustomize/base/gitea-seed/am-conf/realm/root/scriptingservice/1.0/globalconfig/default/scripted_decision_node/engineconfiguration.json` — new, `propertyNamePrefix: "esv."`
-  - `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` — new ConfigMap with base `catalina.properties` content; ESV shim appends ESV entries on every restart
+  - `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` — new ConfigMap with base `catalina.properties` content; tenant shim appends ESV entries on every restart
   - `kustomize/overlay/mock-tenant/am/deployment.yaml` — mounts `am-catalina-properties` at `/usr/local/tomcat/conf/catalina.properties` via `subPath`; removed `esv-variables`/`esv-secrets` `envFrom` entries (no longer needed)
-  - `docker/esv-shim/app/main.py` — `do_restart()` projects ESVs into `am-catalina-properties` instead of `esv-variables`/`esv-secrets`
+  - `docker/tenant-shim/app/main.py` — `do_restart()` projects ESVs into `am-catalina-properties` instead of `esv-variables`/`esv-secrets`
 
 ### DS
 
@@ -1084,9 +1084,9 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **AM and IDM `fbc` PVCs use `ReadWriteOnce` — do not scale past 1 replica** — both `am-fbc` and `idm-fbc` PVCs are provisioned with `accessModes: ReadWriteOnce`, which only allows a single node to mount the volume at a time. Scaling `Deployment/am` or `Deployment/idm` to more than one replica would cause multiple processes writing to the same filesystem directory simultaneously, risking config file corruption and undefined startup behaviour. This stack is single-replica by design; do not raise the replica count without first replacing the PVCs with a `ReadWriteMany`-capable storage class or switching to a different persistence strategy.
 
-### ESV Shim
+### Tenant Shim
 
-- **ESV shim changes require `POST /environment/restart` to take effect** — writes are immediately durable to per-item objects, but AM/IDM read via `envFrom` from the aggregate projection objects. `/environment/restart` re-projects and roll-restarts.
+- **Tenant shim changes require `POST /environment/restart` to take effect** — writes are immediately durable to per-item objects, but AM/IDM read via `envFrom` from the aggregate projection objects. `/environment/restart` re-projects and roll-restarts.
 
 - **`GET /environment/secrets/{_id}` never returns the secret value** — metadata only, matching real AIC.
 
@@ -1118,7 +1118,7 @@ AM originally used `emptyDir` for this volume. Reverting to `emptyDir` simplifie
 
 **Caveat — crash resilience:** The Gitea mirror only runs inside `do_restart()`, which is triggered by `POST /environment/restart`. If AM crashes (OOM, node eviction, etc.) and Kubernetes restarts the pod directly, `filesystem-init` repopulates from Gitea — which only reflects the state at the last mirror. Any live config changes made after the last `POST /environment/restart` (e.g. journeys imported without a subsequent ESV restart) would be lost. With the PVC those changes survive because the volume persists independently of the pod lifecycle. This item should only be actioned if a separate mechanism is added to trigger a mirror on every live AM config change, not just on ESV restart.
 
-**Possible mechanism — FBC watcher sidecar:** A sidecar in the AM pod could watch the FBC directory (`/home/forgerock/openam/config/services`) using `inotifywait` (kernel-level inotify, not polling) in recursive mode with `-e close_write`, and on detecting any write debounce via a timer — reset the timer on each event, and only when a quiet period expires (e.g. 10 seconds of no new writes) make a single call to a dedicated `POST /config/mirror` endpoint on the ESV shim. That endpoint would do only the Gitea push step, without the `catalina.properties` rebuild or the AM restart. AM can write many files during a journey import; debouncing means only one mirror call goes out at the end of the burst. No restart, no ESV projection, just the Gitea push.
+**Possible mechanism — FBC watcher sidecar:** A sidecar in the AM pod could watch the FBC directory (`/home/forgerock/openam/config/services`) using `inotifywait` (kernel-level inotify, not polling) in recursive mode with `-e close_write`, and on detecting any write debounce via a timer — reset the timer on each event, and only when a quiet period expires (e.g. 10 seconds of no new writes) make a single call to a dedicated `POST /config/mirror` endpoint on the tenant shim. That endpoint would do only the Gitea push step, without the `catalina.properties` rebuild or the AM restart. AM can write many files during a journey import; debouncing means only one mirror call goes out at the end of the burst. No restart, no ESV projection, just the Gitea push.
 
 **Files to change:**
 - Remove `kustomize/overlay/mock-tenant/am/am-fbc-pvc.yaml`
@@ -1159,7 +1159,7 @@ This affects everything — realm creation, tree edits, OAuth2 client changes, I
 
 1. **`sync-config` subcommand in `mock-tenant.py`** — `kubectl cp`s the relevant config directories out of the running AM/IDM pod and pushes them directly to Gitea via git, so the change survives the next pod restart. Operator runs it on demand after making changes via the UI or REST. Simple, consistent with the existing `push-config` pattern, no new infrastructure.
 
-2. **On-demand push endpoint (extend ESV shim)** — add an endpoint (e.g. `POST /config/save`) that exports the pod's current `/fbc` config tree and pushes it to Gitea. Same trigger model as `/environment/restart` — no CLI needed, callable via curl.
+2. **On-demand push endpoint (extend tenant shim)** — add an endpoint (e.g. `POST /config/save`) that exports the pod's current `/fbc` config tree and pushes it to Gitea. Same trigger model as `/environment/restart` — no CLI needed, callable via curl.
 
 3. **Automated sidecar (config-saver)** — a container that watches the AM/IDM `/fbc` directory for changes and continuously syncs to Gitea. Covers every change automatically including unscripted UI edits. More complex: requires conflict resolution for partial/transient writes, and adds a standing process that this project's phase 1 deliberately scoped out.
 
@@ -1173,7 +1173,7 @@ Several `mock-tenant.py deploy` steps create AM config via REST (step 10 — rea
 
 Write-back to Gitea would eliminate this: REST steps in deploy would create config once, write-back would push it to Gitea's runtime state, and the static FBC files could be removed. Note that this still requires REST steps to run on every fresh `deploy --force` since the Gitea seed is reset from the static baseline each time — write-back only helps within the lifetime of a deployment, not across redeployments.
 
-The current `_mirror_am_to_gitea()` in the ESV shim already does partial write-back on every `POST /environment/restart`, but only for `realm/root-alpha` and `realm/root-bravo`. Expanding its scope to cover the full config tree would close the gap without new infrastructure.
+The current `_mirror_am_to_gitea()` in the tenant shim already does partial write-back on every `POST /environment/restart`, but only for `realm/root-alpha` and `realm/root-bravo`. Expanding its scope to cover the full config tree would close the gap without new infrastructure.
 
 ### 2. ~~Persist `unindexed-search` DS Privilege~~ — DONE
 
@@ -1199,7 +1199,7 @@ After that, only `platform-config.yaml` (one file) needs editing to change the F
 Files that need updating when FQDN changes (current state):
 - `kustomize/overlay/mock-tenant/base/platform-config.yaml` — `FQDN` and `AM_SERVER_FQDN`
 - `kustomize/overlay/mock-tenant/am/deployment.yaml` — `-Dam.server.fqdn=` in `CATALINA_USER_OPTS` (redundant once above fix applied) and `postStart` hook
-- All `ingress-fqdn.yaml` files under `kustomize/overlay/mock-tenant/` (am, idm, esv-shim, login-ui, admin-ui, end-user-ui)
+- All `ingress-fqdn.yaml` files under `kustomize/overlay/mock-tenant/` (am, idm, tenant-shim, login-ui, admin-ui, end-user-ui)
 - `kustomize/overlay/mock-tenant/tls/certificate.yaml` — TLS SAN `dnsName`
 - `bin/mock-tenant.py` — `PLATFORM_FQDN` constant
 - `bin/get_admin_tok.sh` — `TENANT` variable
@@ -1244,7 +1244,7 @@ Committed in `7e486a062`. All forgeops-owned base and `overlay/default` files re
 - `docker/ds/Dockerfile` — mock-tenant RUN steps
 - `docker/ds/ldif-ext/identities/orgs.ldif` — alpha/bravo OU entries
 - `docker/ds/runtime-scripts/ds-cts/setup` and `ds-idrepo/setup` — saas-aligned indexes/setup
-- `docker/docker-bake.hcl` — additive: config-loader/esv-shim build targets
+- `docker/docker-bake.hcl` — additive: config-loader/tenant-shim build targets
 
 ### 5. ~~Restore `/admin` URL (IDM Admin UI)~~ — N/A
 
@@ -1264,11 +1264,9 @@ Pods that reference `gcr.io/engineeringpit/lodestar-images/...` images (e.g. IG 
 
 Option 1 is the lowest-friction path — no credential management, consistent with the existing `IfNotPresent` pattern, and can be added as a pre-deploy step to `mock-tenant.py`.
 
-### 11. Rename `esv-shim` to `tenant-shim`
+### 11. ~~Rename `esv-shim` to `tenant-shim`~~ ✓ DONE
 
-The service has grown beyond ESV emulation — it now also handles AM secret-store mapping endpoints (`GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}`), and is the natural place to add further AIC-specific endpoint stubs. The name `esv-shim` undersells what it does.
-
-Rename involves: `docker/esv-shim/` directory, `esv-shim:local` image tag, `kustomize/base/esv-shim/` and `kustomize/overlay/mock-tenant/esv-shim/` directories, all references in `bin/mock-tenant.py`, the `ESV Shim` section heading in `mock-tenant.md`, and the `RESTART_DEPLOYMENTS` label inside `main.py` if it references the service by name.
+Completed 2026-08-10. All directories, image tags, YAML filenames, Kubernetes resource names, and string references renamed from `esv-shim` / `ESV Shim` to `tenant-shim` / `Tenant Shim`.
 
 ### 8. Research: Get `IdentityStoreDecisionNode` into ForgeOps AM
 
@@ -1307,9 +1305,9 @@ The journey script calls `httpClient.send(url, { clientName: "wxa-client-mtls-ce
 | 3 | `esv-secrets` was an `emptyDir` — files were lost on every AM restart, so the `KeyManager` always initialized with an empty store | Replaced with a dedicated 10Mi PVC (`am-esv-secrets`) mounted at `/home/forgerock/openam/esv-secrets/`; files now survive indefinitely |
 | 4 | `RefreshedX509ExtendedKeyManager` cached an empty `KeyManager` on first load (before files existed); no mapping-change event ever triggered a reload | AM restart after the correct files were in place caused `createClient()` to re-initialize with the cert present |
 
-### What Is Still Manual (Pending esv-shim Fix)
+### What Is Still Manual
 
-The esv-shim currently writes PEM files using the ESV alias name (e.g. `esv-mtls-client-cert-wajih-dev4`). After each `apply-customer-configuration`, the correct full-secretId files must either exist from a previous run (they survive on the PVC) or be written manually. The pending fix is to update `_write_pem_secret_to_am()` in `docker/esv-shim/app/main.py` to derive the full secretId from the mapping ConfigMaps and write the file with that name instead.
+PEM file writes are now automated: `_write_pem_secret_to_am()` in `docker/tenant-shim/app/main.py` reverse-looks up the full secretId from mapping ConfigMaps and writes the file with the correct name at `do_restart()` time. Files survive on the PVC across AM restarts.
 
 ### FBC Files
 

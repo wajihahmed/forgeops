@@ -1,12 +1,12 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: esv-shim
+  name: tenant-shim
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: esv-shim
+  name: tenant-shim
 rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
@@ -24,11 +24,11 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: esv-shim
+  name: tenant-shim
 subjects:
   - kind: ServiceAccount
-    name: esv-shim
+    name: tenant-shim
 roleRef:
   kind: Role
-  name: esv-shim
+  name: tenant-shim
   apiGroup: rbac.authorization.k8s.io

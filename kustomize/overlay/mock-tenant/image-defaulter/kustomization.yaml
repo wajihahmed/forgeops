@@ -31,8 +31,8 @@ images:
 - name: config-loader
   newName: config-loader
   newTag: local
-- name: esv-shim
-  newName: esv-shim
+- name: tenant-shim
+  newName: tenant-shim
   newTag: local
 labels:
 - includeSelectors: true

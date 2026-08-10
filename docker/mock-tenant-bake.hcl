@@ -2,7 +2,7 @@ variable "CONFIG_LOADER_FROM_IMAGE" {
   default = null
 }
 
-variable "ESV_SHIM_FROM_IMAGE" {
+variable "TENANT_SHIM_FROM_IMAGE" {
   default = null
 }
 
@@ -12,7 +12,7 @@ group "base-extra" {
     "rcs-agent",
     "git-server",
     "config-loader",
-    "esv-shim",
+    "tenant-shim",
   ]
 }
 
@@ -30,16 +30,16 @@ target "config-loader" {
   cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/config-loader:build-cache"]
 }
 
-target "esv-shim" {
+target "tenant-shim" {
   inherits = ["base"]
 
-  context = "./esv-shim"
+  context = "./tenant-shim"
   dockerfile = "Dockerfile"
   args = {
-    FROM_IMAGE = ESV_SHIM_FROM_IMAGE
+    FROM_IMAGE = TENANT_SHIM_FROM_IMAGE
   }
 
-  tags = "${tags("${REGISTRY}", "${REPOSITORY}", "esv-shim", "${BUILD_TAG}")}"
-  cache-to = ["mode=max,type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/esv-shim:build-cache"]
-  cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/esv-shim:build-cache"]
+  tags = "${tags("${REGISTRY}", "${REPOSITORY}", "tenant-shim", "${BUILD_TAG}")}"
+  cache-to = ["mode=max,type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/tenant-shim:build-cache"]
+  cache-from = ["type=registry,ref=${CACHE_REGISTRY}/${CACHE_REPOSITORY}/tenant-shim:build-cache"]
 }

@@ -14,5 +14,5 @@ resources:
 - ./login-ui
 - ./gitea
 - ./gitea-seed
-- ./esv-shim
+- ./tenant-shim
 namespace: fr-platform

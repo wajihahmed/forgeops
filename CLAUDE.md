@@ -1,6 +1,6 @@
 # ForgeOps — FBC Dev Stack Project
 
-See **[mock-tenant.md](mock-tenant.md)** for the full user, developer, and design guide — architecture, prerequisites, deploy guide, implementation details (all changed files), AM tree config, SaaS sync plan, ESV shim, operational runbook, and known issues.
+See **[mock-tenant.md](mock-tenant.md)** for the full user, developer, and design guide — architecture, prerequisites, deploy guide, implementation details (all changed files), AM tree config, SaaS sync plan, tenant shim, operational runbook, and known issues.
 
 ---
 
@@ -11,7 +11,7 @@ See **[mock-tenant.md](mock-tenant.md)** for the full user, developer, and desig
 python3 bin/mock-tenant.py bootstrap
 # Also add to /etc/hosts: 127.0.0.1 mock.iam.example.com
 
-# Deploy the application stack (AM, IDM, DS, Gitea, ESV shim):
+# Deploy the application stack (AM, IDM, DS, Gitea, tenant shim):
 python3 bin/mock-tenant.py deploy
 ```
 
