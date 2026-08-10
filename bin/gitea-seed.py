@@ -10,6 +10,12 @@ Subcommands:
   merge managed   -- patches managed.json (adds/removes IDM managed object types)
   merge repo-ds   -- patches repo.ds.json (adds resource mappings for saas object types)
   merge access    -- patches access.json  (adds saas roles and access policy entries)
+                     NOTE: currently unused — access.json was removed from the gitea-seed
+                     because the base image default is sufficient for this stack. Re-enable
+                     if AIC-specific roles (openidm-svcacct, super-admins, tenant-admins etc.)
+                     are needed: run this, write the output to
+                     kustomize/base/gitea-seed/idm-conf/access.json, and add ("access",
+                     "access.json") back to _AIC_IDM_CONF_FILES in mock-tenant.py.
   am-mirror       -- mirrors root realm tree/node config from a live AM pod into
                      am-conf/ for alpha and bravo realms (no saas repo needed)
 

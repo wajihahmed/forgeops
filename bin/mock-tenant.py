@@ -9,7 +9,7 @@ Commands:
 
 Usage:
   python3 bin/mock-tenant.py [--context CONTEXT] bootstrap
-  python3 bin/mock-tenant.py [--context CONTEXT] deploy [--redeploy]
+  python3 bin/mock-tenant.py [--context CONTEXT] deploy [--force]
   python3 bin/mock-tenant.py [--context CONTEXT] push-config [--target idm|am|all] [--saasrepo-path PATH]
 
 --context defaults to "orbstack". Pass --context minikube (or set MOCK_TENANT_K8S_CONTEXT)
@@ -34,12 +34,11 @@ K8S_CONTEXT = os.environ.get("MOCK_TENANT_K8S_CONTEXT", "orbstack")
 # Static merged IDM config files committed to this repo — source of truth for Gitea.
 IDM_CONF_STATIC_DIR = "kustomize/base/gitea-seed/idm-conf"
 IDM_SCRIPT_STATIC_DIR = "kustomize/base/gitea-seed/idm-script"
-_IDM_CONF_FILES = [
+_AIC_IDM_CONF_FILES = [
     ("managed", "managed.json"),
     ("repo-ds",  "repo.ds.json"),
-    ("access",   "access.json"),
 ]
-_IDM_SCRIPT_FILES = [
+_AIC_IDM_SCRIPT_FILES = [
     "teammember.js",
 ]
 
@@ -450,6 +449,52 @@ def _step_create_realms():
     print("  Realms ✓")
 
 
+def _step_create_secret_store():
+    step("10b", "Create FileSystemSecretStore/ESV in AM (global + per-realm)")
+    admin_pw = kube_secret_value("am-env-secrets", "AM_PASSWORDS_AMADMIN_CLEAR")
+    token = _am_token(admin_pw)
+
+    store_payload = '{"_id": "ESV", "format": "PEM", "directory": "/home/forgerock/openam/esv-secrets"}'
+
+    # Global store
+    r = run(
+        f'curl -sk "https://{PLATFORM_FQDN}/am/json/global-config/secrets/stores/FileSystemSecretStore/ESV" '
+        f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: resource=1.0"',
+        capture=True, check=False,
+    )
+    if r.returncode == 0 and '"_id"' in r.stdout:
+        print("  FileSystemSecretStore/ESV (global) already exists, skipping")
+    else:
+        run(
+            f'curl -sk -X POST '
+            f'"https://{PLATFORM_FQDN}/am/json/global-config/secrets/stores/FileSystemSecretStore/?_action=create" '
+            f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: resource=1.0" '
+            f'-H "Content-Type: application/json" '
+            f"-d '{store_payload}'",
+            capture=True,
+        )
+        print("  FileSystemSecretStore/ESV (global) ✓")
+
+    for realm in ("alpha", "bravo"):
+        r = run(
+            f'curl -sk "https://{PLATFORM_FQDN}/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/FileSystemSecretStore/ESV" '
+            f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: resource=1.0"',
+            capture=True, check=False,
+        )
+        if r.returncode == 0 and '"_id"' in r.stdout:
+            print(f"  FileSystemSecretStore/ESV ({realm}) already exists, skipping")
+        else:
+            run(
+                f'curl -sk -X POST '
+                f'"https://{PLATFORM_FQDN}/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/FileSystemSecretStore?_action=create" '
+                f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: resource=1.0" '
+                f'-H "Content-Type: application/json" '
+                f"-d '{store_payload}'",
+                capture=True,
+            )
+            print(f"  FileSystemSecretStore/ESV ({realm}) ✓")
+
+
 def _step_create_tenant_stubs():
     step("11a", "Create tenant stubs (org-system ConfigMaps)")
 
@@ -550,7 +595,10 @@ def _step_create_tenant_stubs():
     os.unlink(tmp)
     print("  org-engine cronjob (stub) ✓")
 
-    # am-logging-config — AM logback XML; read by load tests from fr-platform.
+    # am-logging-config — ConfigMap containing a logback.xml that sets AM to WARN level
+    # with structured JSON output. ForgeOps AM does not consume this at runtime; it is a 
+    # well-known artefact read by the load-testing harness (pyrock/lodestar) running in 
+    # the cluster so it knows how to parse and ingest AM log output during a test run.
     am_logging_config = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -844,15 +892,14 @@ def _step_teardown():
 def cmd_deploy(args):
     _start = time.monotonic()
     os.chdir(os.path.join(os.path.dirname(__file__), ".."))
-    if args.redeploy:
-        _step_teardown()
-    else:
-        r = kubectl(f"get namespace {NAMESPACE}", capture=True, check=False)
-        if r.returncode == 0:
+    r = kubectl(f"get namespace {NAMESPACE}", capture=True, check=False)
+    if r.returncode == 0:
+        if not args.force:
             raise SystemExit(
                 f"Namespace '{NAMESPACE}' already exists.\n"
-                f"Use --redeploy to tear it down and redeploy from scratch."
+                f"Use --force to tear it down and redeploy from scratch."
             )
+        _step_teardown()
     _step_prerequisites()
     _step_build_images()
     _step_create_namespace()
@@ -864,13 +911,22 @@ def cmd_deploy(args):
     _step_deploy_tls()
     _step_deploy_am_idm_uis()
     _step_create_realms()
+    _step_create_secret_store()
     _step_amster_and_fix_secret()
     _step_create_tenant_stubs()
     _step_create_pkce_client()
     _step_verify_fbc()
     _step_health_checks()
-    # Step 14 — push IDM and AM config to Gitea; force restart so IDM picks up
-    # the secret patch from step 11 even if Gitea config was already up to date.
+    # Step 14 — push IDM and AM config to Gitea and restart both pods.
+    # force_restart=True is required for IDM: step 11 patches amster-env-secrets with the correct
+    # IDM_RS_CLIENT_SECRET / IDM_PROVISIONING_CLIENT_SECRET values, which IDM reads via envFrom at
+    # pod startup only — a running pod never sees the updated values without a restart. The restart
+    # is forced even when Gitea config was unchanged so the secret patch is always picked up.
+    # AM does not need this restart for correctness — realm creation (step 10) and OAuth2 client
+    # secret fixes (step 11) are written directly via AM REST and persisted to FBC immediately.
+    # AM is restarted here only because both pods take similar time and the step already waits for
+    # both; if deploy time ever needs to be optimised, the AM restart could be removed and IDM
+    # could be restarted independently after step 11.
     _push_config(target="all", saas_repo_path=None, force_restart=True)
     _step_print_credentials()
     elapsed = time.monotonic() - _start
@@ -884,12 +940,12 @@ def cmd_deploy(args):
 
 def _push_idm(clone_dir):
     """Copy IDM static config and script files into the customer-config clone."""
-    for _, conf_file in _IDM_CONF_FILES:
+    for _, conf_file in _AIC_IDM_CONF_FILES:
         src = os.path.join(IDM_CONF_STATIC_DIR, conf_file)
         dst = os.path.join(clone_dir, "idm", "conf", conf_file)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
-    for script_file in _IDM_SCRIPT_FILES:
+    for script_file in _AIC_IDM_SCRIPT_FILES:
         src = os.path.join(IDM_SCRIPT_STATIC_DIR, script_file)
         dst = os.path.join(clone_dir, "idm", "script", script_file)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -943,7 +999,7 @@ def _sync_idm_from_saas(saas_overrides_dir):
     merge_script = os.path.join(os.path.dirname(__file__), "gitea-seed.py")
     any_updated = False
 
-    for subcommand, conf_file in _IDM_CONF_FILES:
+    for subcommand, conf_file in _AIC_IDM_CONF_FILES:
         if subcommand is None:
             continue  # not a saas-merge target; managed directly in the repo
         print(f"  Syncing {conf_file} from saas...")
@@ -1049,10 +1105,10 @@ def main():
     # deploy
     deploy_p = sub.add_parser("deploy", help="Deploy the application stack (AM, IDM, DS, Gitea, ESV shim) — run bootstrap first")
     deploy_p.add_argument(
-        "--redeploy",
+        "--force",
         action="store_true",
         default=False,
-        help="Delete fr-platform, org-public, and org-system namespaces before deploying (full teardown + redeploy)",
+        help="Tear down existing deployment before deploying (required if namespace already exists)",
     )
 
     # push-config

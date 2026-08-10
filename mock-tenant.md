@@ -86,6 +86,21 @@ The FBC importer must scan both paths. The override is in `kustomize/overlay/moc
 
 A single Gitea pod serves `http://gitea.fr-platform.svc.cluster.local:3000`. The repo `forgerock/customer-config` holds AM and IDM config files, seeded by the `gitea-seed` Job.
 
+### REST API vs Gitea FBC — Two Complementary Mechanisms
+
+For any AM service configuration (secret stores, realms, httpclient instances, etc.) there are two ways to get config into a running AM pod:
+
+1. **REST API at deploy time** — `mock-tenant.py deploy` creates the configuration by calling AM's REST API (e.g. step 10 creates realms, step 10b creates `FileSystemSecretStore/ESV`). This is the right tool for the initial creation of config that doesn't exist in the base image.
+
+2. **Gitea FBC** — the corresponding JSON file is committed under `kustomize/base/gitea-seed/am-conf/` and pushed to Gitea. `custom-vol-init` re-applies the entire Gitea tree on every pod start, so the config comes back automatically after any AM restart.
+
+**Neither mechanism alone is sufficient:**
+
+- REST only → config exists after `deploy`, but disappears on any bare AM pod restart (crash, node eviction, `kubectl rollout restart`) because `filesystem-init` repopulates `/fbc` from Gitea, which doesn't have the change.
+- Gitea FBC only → config is present after a restart, but not on a fresh deploy (AM must already be running for REST to work, and the Gitea seed Job runs before AM is ready).
+
+**The correct pattern for any persistent AM service config is both:** create via REST in the deploy step *and* commit the equivalent FBC JSON to `kustomize/base/gitea-seed/am-conf/` so it survives restarts. The same principle applies to IDM config committed under `kustomize/base/gitea-seed/idm-conf/`.
+
 ### Customer-Config Repo Structure
 
 ```
@@ -286,6 +301,13 @@ Steps are numbered 0–15 internally. Key ordering constraints:
 
 10. **Create alpha and bravo realms** — via `POST /json/global-config/realms/?_action=create`.
     Idempotent: checks existing realms with `_queryFilter=true` and filters client-side (the endpoint returns 501 for filtered queries).
+
+10b. **Create FileSystemSecretStore/ESV in AM** — via `POST /am/json/global-config/secrets/stores/FileSystemSecretStore/?_action=create`.
+    Creates a `FileSystemSecretStore` instance named `ESV` pointing at `/home/forgerock/openam/config/services/esv-secrets` (on the FBC PVC).
+    This is the local equivalent of the `GoogleSecretManagerSecretStoreProvider/ESV` store that AIC pre-wires to Google Secret Manager.
+    AM's httpclient mTLS cert resolution (`mtlsClientCertSecretPurpose`) reads from this store.
+    Idempotent: skips if the store already exists.
+    **Note:** the `esv-secrets/` directory itself does NOT exist after this step — it is created lazily by `_write_pem_secrets_to_am()` in the esv-shim on the first `POST /environment/restart` that has PEM-encoded secrets to write (i.e. after `apply-customer-configuration` runs). The store registration and the directory creation are intentionally separate steps.
 
 11. **Deploy amster and fix OAuth2 client secrets** — `bin/forgeops apply -e mock-tenant -n fr-platform amster`
 
@@ -746,18 +768,55 @@ Per-item objects (source of truth, PUT-upsert target):
    Note: secret valueBase64 is stored verbatim (k8s Secret.data is itself base64 — no re-encoding).
    Variable valueBase64 is decoded once to plain; re-encoded on GET.
 
-POST /environment/restart:
+ESV secrets fall into two categories that are consumed differently by AM/IDM:
+
+   1. Scalar (single static value) ESVs — strings, JSON blobs, numbers, key material stored as plain text.
+      Consumed via systemEnv.getProperty("esv.foo.bar") in AM scripts, or
+      identityServer.getProperty("esv.foo.bar") in IDM scripts.
+      Injected by do_restart() into catalina.properties (AM) and boot.properties (IDM).
+      All ESV variables and most ESV secrets fall into this category.
+
+   2. PEM/cert ESVs — secrets with esv.forgeops/encoding=pem annotation, containing
+      certificate and/or private key material.
+      AM cannot consume these as a string property — it loads them as Java crypto objects
+      through its secret store machinery (FileSystemSecretStore/ESV).
+      do_restart() writes these as files to /home/forgerock/openam/config/services/esv-secrets/
+      on the AM FBC PVC. Secret-store mappings (PUT by lodestar) tell AM which file
+      maps to which secret purpose (e.g. mtlsClientCertSecretPurpose).
+
+      IMPORTANT — write order: PEM files must be written AFTER the AM pod has fully restarted,
+      not before. The reason: custom-vol-init (the init container) runs on every pod start and
+      clones /home/forgerock/openam/config/services/ fresh from Gitea, completely replacing its
+      contents. Since esv-secrets/ is not tracked in Gitea, any files written there before the
+      restart are wiped when the new pod starts. do_restart() therefore: (1) triggers the rolling
+      restart, (2) waits for the new AM pod to be fully ready via _wait_for_rollout("am"),
+      (3) only then writes the PEM files — at which point custom-vol-init has already finished
+      and the directory is stable for the lifetime of the pod.
+
+POST /environment/restart — execution order:
    1. List all esv-var-* / esv-secret-* objects by label
-   2. Build catalina.properties content = base Tomcat properties + ESV entries:
-        esv.foo.bar=<value>   (esv-foo-bar key translated to dot notation)
-        Values escaped for Java .properties format (handles large JSON/key pairs)
-      Patch ConfigMap am-catalina-properties with this content
-      AM Deployment mounts am-catalina-properties at /usr/local/tomcat/conf/catalina.properties
-      via subPath — Tomcat loads this into JVM system properties at bootstrap
-   3. Mirror live AM and IDM config to Gitea (see below)
-   4. Patch Deployment am and Deployment idm with a
-      esv.forgeops/restarted-at: <timestamp> pod-template annotation
-      → triggers a rolling restart; new AM pod starts with ESV values in system properties
+   2. Build catalina.properties (AM) and boot.properties (IDM) with all ESV scalar values.
+      Patch ConfigMaps am-catalina-properties and idm-boot-properties.
+      (These are ConfigMap volume mounts — picked up at next pod start, no exec needed.)
+   3. Mirror live AM FBC (realm/root-alpha, realm/root-bravo) to Gitea — so journeys/nodes
+      imported live survive the restart. Written by: esv-shim via kubectl exec tar|base64.
+   4. Mirror live IDM conf/ and script/ to Gitea — so managed objects imported live survive
+      the restart. Written by: esv-shim via kubectl exec tar|base64.
+   5. Patch Deployment am and Deployment idm with esv.forgeops/restarted-at annotation
+      → triggers rolling restart. New AM pod starts: custom-vol-init clones Gitea (steps 3+4
+      content now in Gitea) → filesystem-init overlays → AM starts with updated FBC and ESV
+      scalar values from catalina.properties.
+   6. Wait for AM rollout to complete (_wait_for_rollout polls apps_v1 until all replicas ready).
+   7. Write PEM files to AM pod via kubectl exec — AFTER custom-vol-init has finished and the
+      directory is stable. Written by: esv-shim to /home/forgerock/openam/config/services/esv-secrets/
+      on the am-fbc PVC. These files persist for the lifetime of the pod and are read on demand
+      by AM's FileSystemSecretStore/ESV when an httpclient mTLS cert is needed.
+
+PUT /am/json/realms/root/realms/{realm}/realm-config/secrets/stores/
+    GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}:
+   1. Persist mapping in a ConfigMap (esv-mapping-<realm-name>) — same as before
+   2. Forward the mapping to AM's local FileSystemSecretStore/ESV via PUT
+      (translates the store type transparently — AM stores the mapping against the local store)
 ```
 
 **Key design decisions:**
@@ -765,6 +824,7 @@ POST /environment/restart:
 - **Apply mechanism:** projects all ESV values into `am-catalina-properties` ConfigMap as Java system properties (`esv.foo.bar=value`), then roll-restarts AM/IDM. AM scripts call `systemEnv.getProperty("esv.foo.bar")` which resolves against JVM system properties — Tomcat's `catalina.properties` is the correct injection point, replicating what AIC's `secrets-loader` does.
 - **Why not env vars:** `systemEnv.getProperty()` uses `System.getProperty()` (JVM system properties), not `System.getenv()`. Env var names cannot contain dots on Linux, so `esv-foo-bar` (dashes) cannot be looked up as `esv.foo.bar` (dots). The `catalina.properties` approach handles this correctly and also supports large values (JSON blobs, key pairs) without command-line length limits.
 - **AM config mirror before restart:** `apply-customer-configuration` imports journeys and ESVs into live AM via REST, then calls `POST /environment/restart`. Because AM's `filesystem-init` init container repopulates `/home/forgerock/openam/config/services` from Gitea on every pod boot, any live config not committed to Gitea is lost on restart. To prevent this, `do_restart()` snapshots the live FBC realm directories (`realm/root-alpha`, `realm/root-bravo`) from the AM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `am/services/realm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only so ESV values always take effect even if Gitea is unreachable. This required adding `git` to the shim image and `pods`/`pods/exec` RBAC.
+- **mTLS cert loading via FileSystemSecretStore:** On real AIC, AM resolves httpclient `mtlsClientCertSecretPurpose` through a `GoogleSecretManagerSecretStoreProvider/ESV` store instance pre-wired by the platform to Google Secret Manager. Locally this store instance doesn't exist, so AM presents no client cert and the mTLS handshake fails with 403. The fix is three-part: (1) `mock-tenant.py` step 10b creates a `FileSystemSecretStore/ESV` instance in AM at deploy time, pointing at `/home/forgerock/openam/config/services/esv-secrets/` on the FBC PVC — the directory does not yet exist at this point; (2) `do_restart()` creates the directory via `kubectl exec mkdir -p` and writes every PEM-encoded ESV secret (those with `esv.forgeops/encoding: pem` annotation) as a file into it — the filename is the k8s Secret name minus the `esv-secret-` prefix — this happens on the first `POST /environment/restart` after `apply-customer-configuration` has imported the PEM secrets; (3) when lodestar PUTs a secret-store mapping targeting `GoogleSecretManagerSecretStoreProvider/ESV`, the shim intercepts it, stores it in a ConfigMap as before, and also forwards it to AM's `FileSystemSecretStore/ESV` via the AM internal REST API — so AM knows which file to load for which purpose. No new PVC or volume mounts are needed: the files go onto the existing `am-fbc` PVC which already backs `/home/forgerock/openam/config/services/`.
 - **IDM config mirror before restart:** The same root cause applies to IDM — `apply-customer-configuration` PATCHes custom managed objects (`Captcha`, `config_data`, `key_manager`, `service_token_storage`) into live IDM via `PATCH /openidm/config/managed`. Because IDM's `fbc` volume is an emptyDir repopulated from Gitea by `custom-vol-init` on every pod boot, any live IDM config not committed to Gitea is lost on restart. `do_restart()` now also calls `_mirror_idm_to_gitea()` which snapshots `conf/` and `script/` from the IDM pod via `kubectl exec tar | base64`, clones `customer-config` from Gitea, extracts the snapshot into `idm/`, and commits+pushes if anything changed — before triggering the restart. Mirror failure is warning-only (same as AM mirror).
 - **Auth:** none — ClusterIP only, cluster-internal
 - **PUT is an upsert** — `201` if id didn't exist, `200` if it did; no POST-to-create — matches real AIC
@@ -784,8 +844,11 @@ Wire-format compatible with real AIC, verified by running lodestar's `tenant_uti
 | GET | `/environment/secrets/{_id}` | single item metadata, same shape (no value) |
 | PUT | `/environment/secrets/{_id}` | body: `{valueBase64, description?, encoding?, useInPlaceholders?}` — upsert: `201` / `200` |
 | DELETE | `/environment/secrets/{_id}` | `204` |
-| POST | `/environment/restart` | project all items → `am-catalina-properties` (JVM system properties) + roll-restart am/idm; returns `{variableCount, secretCount, restarted}` |
+| POST | `/environment/restart` | write PEM secrets to AM pod → project all items → `am-catalina-properties` (JVM system properties) + roll-restart am/idm; returns `{variableCount, secretCount, restarted}` |
 | POST | `/environment/apply` | alias of `/environment/restart` (convenience — not part of real AIC API) |
+| PUT | `/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}` | persists mapping in ConfigMap AND forwards to AM's `FileSystemSecretStore/ESV` — `201` / `200` |
+| GET | `/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}` | returns stored mapping from ConfigMap |
+| DELETE | `/am/json/realms/root/realms/{realm}/realm-config/secrets/stores/GoogleSecretManagerSecretStoreProvider/ESV/mappings/{name}` | deletes ConfigMap; `204` |
 
 ### RBAC
 
@@ -954,6 +1017,8 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **amster only creates OAuth2 clients in the root realm** — `idm-resource-server` and `idm-provisioning` are created only in root by amster. Alpha/bravo inherit `idm-provisioning` via `am-mirror` FBC import, but the secret baked into those FBC files at mirror time will be stale after step 11 regenerates it. Step 11 in `mock-tenant.py` explicitly pushes the correct secret into all three realms.
 
+- **amster cannot configure realm-level OAuth2 provider settings (e.g. statelessTokensEnabled)** — amster's config profile targets `realms/root` only; there is no amster equivalent for alpha/bravo realm-level service configuration. OAuth2 provider settings for alpha/bravo (such as `statelessTokensEnabled`) must be set via the gitea-seed FBC files at `kustomize/base/gitea-seed/am-conf/realm/root-alpha|root-bravo/oauth2provider/1.0/organizationconfig/default.json` and take effect on the next redeploy from scratch.
+
 - **amster never sets the idm-resource-server OAuth2 client secret** — it always resolves to the hardcoded literal `password`. The config profile uses `&{idm.rs.client.secret|password}` and nothing sets that Java property anywhere in kustomize/charts. Step 10 in `mock-tenant.py` fixes this via AM's REST API.
 
 - **AM's OAuth2 endpoints reject client secrets containing `+` or `/`** — `secret-generator` occasionally produces base64-alphabet secrets with these characters, which break AM Basic Auth with `invalid_client` even when the secret is otherwise correct. `mock-tenant.py` step 11 regenerates both `IDM_RS_CLIENT_SECRET` and `IDM_PROVISIONING_CLIENT_SECRET` to alphanumeric-only. Diagnostic: `{"active":false}` on `/oauth2/introspect` means client auth passed; `{"error":"invalid_client"}` means it didn't.
@@ -1088,19 +1153,27 @@ Currently FBC is one-way: Gitea → pod. Any config change made via the AM/IDM A
 
 This affects everything — realm creation, tree edits, OAuth2 client changes, IDM config changes — not just the alpha/bravo realm workaround documented in the runbook.
 
+**Design intent:** Gitea is a runtime persistence layer for the lifetime of a development use case — it keeps config alive across pod restarts within a single deployment. It is **not** a mechanism to write config back to the local repo on disk. Writing back to disk would pollute the baseline with use-case-specific config that is not relevant to other use cases. The local repo (`kustomize/base/gitea-seed/`) holds curated, use-case-agnostic baseline config; Gitea holds the live runtime state for the current deployment.
+
 **Approaches to investigate:**
 
 1. **`sync-config` subcommand in `mock-tenant.py`** — `kubectl cp`s the relevant config directories out of the running AM/IDM pod and pushes them directly to Gitea via git, so the change survives the next pod restart. Operator runs it on demand after making changes via the UI or REST. Simple, consistent with the existing `push-config` pattern, no new infrastructure.
 
-2. **`save-config` subcommand in `mock-tenant.py`** — `kubectl cp`s the config out of the pod and writes it to the local ForgeOps repo on disk (under `kustomize/base/gitea-seed/am-conf/` or equivalent) so the operator can review the diff, commit it to git, and then `push-config` to Gitea. Gives full control over what gets persisted.
+2. **On-demand push endpoint (extend ESV shim)** — add an endpoint (e.g. `POST /config/save`) that exports the pod's current `/fbc` config tree and pushes it to Gitea. Same trigger model as `/environment/restart` — no CLI needed, callable via curl.
 
-3. **On-demand push endpoint (extend ESV shim)** — add an endpoint (e.g. `POST /config/save`) that exports the pod's current `/fbc` config tree and pushes it to Gitea. Same trigger model as `/environment/restart` — no CLI needed, callable via curl.
+3. **Automated sidecar (config-saver)** — a container that watches the AM/IDM `/fbc` directory for changes and continuously syncs to Gitea. Covers every change automatically including unscripted UI edits. More complex: requires conflict resolution for partial/transient writes, and adds a standing process that this project's phase 1 deliberately scoped out.
 
-4. **Automated sidecar (config-saver)** — a container that watches the AM/IDM `/fbc` directory for changes and continuously syncs to Gitea. Covers every change automatically including unscripted UI edits. More complex: requires conflict resolution for partial/transient writes, and adds a standing process that this project's phase 1 deliberately scoped out.
+4. **PVC for `/home/forgerock/openam`** — mount a PersistentVolumeClaim at `/home/forgerock/openam` (AM's working directory where FBC config, keystore, and runtime state live). Any write made via the UI or REST API would land on the PVC and survive pod restarts with no operator action. Trade-offs to investigate: whether `filesystem-init` (which clones from Gitea into `/fbc`) would conflict with a pre-populated PVC on first boot; whether the PVC contents can diverge from Gitea in ways that are hard to reason about; and whether this approach extends naturally to IDM (whose working directory is different).
 
-5. **PVC for `/home/forgerock/openam`** — mount a PersistentVolumeClaim at `/home/forgerock/openam` (AM's working directory where FBC config, keystore, and runtime state live). Any write made via the UI or REST API would land on the PVC and survive pod restarts with no operator action. Trade-offs to investigate: whether `filesystem-init` (which clones from Gitea into `/fbc`) would conflict with a pre-populated PVC on first boot; whether the PVC contents can diverge from Gitea in ways that are hard to reason about; and whether this approach extends naturally to IDM (whose working directory is different).
+Option 1 is likely the right starting point — simple, on-demand, no new infrastructure. Option 4 (PVC) would eliminate the write-back problem entirely at the cost of Gitea no longer being the authoritative runtime state.
 
-The exact implementation is to be researched. Options 1 and 2 together are likely the right starting point — `sync-config` for quick persistence, `save-config` for changes meant to be committed to the repo. Option 5 (PVC) would eliminate the write-back problem entirely at the cost of Gitea no longer being the source of truth.
+**Relationship to deploy-step REST config and the dual-maintenance pattern:**
+
+Several `mock-tenant.py deploy` steps create AM config via REST (step 10 — realms, step 10b — `FileSystemSecretStore/ESV`, step 11b — PKCE client). For those changes to survive a bare AM restart, equivalent FBC JSON files must also exist in `kustomize/base/gitea-seed/am-conf/` — so any REST-created config currently requires maintenance in two places. This is the dual-maintenance burden described in [REST API vs Gitea FBC](#rest-api-vs-gitea-fbc--two-complementary-mechanisms).
+
+Write-back to Gitea would eliminate this: REST steps in deploy would create config once, write-back would push it to Gitea's runtime state, and the static FBC files could be removed. Note that this still requires REST steps to run on every fresh `deploy --force` since the Gitea seed is reset from the static baseline each time — write-back only helps within the lifetime of a deployment, not across redeployments.
+
+The current `_mirror_am_to_gitea()` in the ESV shim already does partial write-back on every `POST /environment/restart`, but only for `realm/root-alpha` and `realm/root-bravo`. Expanding its scope to cover the full config tree would close the gap without new infrastructure.
 
 ### 2. ~~Persist `unindexed-search` DS Privilege~~ — DONE
 
@@ -1202,3 +1275,49 @@ Rename involves: `docker/esv-shim/` directory, `esv-shim:local` image tag, `kust
 `IdentityStoreDecisionNode` is AIC-only and does not exist in the ForgeOps AM image. Using it causes `IllegalArgumentException: Unsupported node type IdentityStoreDecisionNode` — see the [Known Issues section](#why-identitystoredecisionnode-cannot-be-used) for the current workaround (`DataStoreDecisionNode` + `identityResource` on the tree).
 
 Research whether the node can be introduced into ForgeOps AM (e.g. via a custom auth node jar, or by identifying which AIC AM jar contains it and adding it to the image). If feasible, this would allow closer parity with AIC Login trees without the `identityResource` workaround.
+
+---
+
+## mTLS Client Certificate — How It Works (and What Broke It)
+
+This section documents the investigation that produced `ssl_verify=SUCCESS` in the mock-api nginx logs on 2026-08-10. The fix required understanding four distinct layers of AM internals.
+
+### The Goal
+
+AM makes outbound HTTPS calls to mock-api (e.g. `POST /mocks-ciam/ciam/pin/api/v1/verify`). mock-api nginx requires a valid client certificate (`ssl_verify_client optional; if ($ssl_client_verify != SUCCESS) { return 403; }`). AM must present the cert via mTLS. The symptom of failure was `ssl_verify=NONE ssl_dn="-"` in nginx access logs, and a 403 response.
+
+### How AM Resolves the mTLS Client Certificate
+
+The journey script calls `httpClient.send(url, { clientName: "wxa-client-mtls-cert" })`. AM looks up the `httpclient` service instance `wxa-client-mtls-cert`, which has `mtlsClientCertSecretPurpose: "wxaclientcrtmtls"`. The resolution chain from there:
+
+1. **`@SecretPurpose` annotation** — the `mtlsClientCertSecretPurpose` field on `HttpClientInstance` carries `@SecretPurpose("am.services.httpclient.mtls.clientcert.%s.secret")`. AM substitutes the configured value (`wxaclientcrtmtls`) to form the full **secretId**: `am.services.httpclient.mtls.clientcert.wxaclientcrtmtls.secret`.
+
+2. **`FileSystemSecretStore` filename** — AM looks for a file named exactly `am.services.httpclient.mtls.clientcert.wxaclientcrtmtls.secret` in the store's configured directory (`/home/forgerock/openam/esv-secrets/`). The `OrderedStableIdResolver` matches filenames against `<secretId>(<versionSuffix>\d+)?$` — so the filename must be the full secretId, not the short purpose label. Files named `wxaclientcrtmtls` or `esv-mtls-client-cert-wajih-dev4` are ignored.
+
+3. **`PEM` format, not `PLAIN`** — the store must be configured with `"format": "PEM"`. With `PLAIN`, AM reads the bytes as a generic secret and cannot parse the certificate/key structure needed to build an `X509ExtendedKeyManager`. The file content must be a PEM bundle containing both the private key (`-----BEGIN RSA PRIVATE KEY-----`) and the certificate (`-----BEGIN CERTIFICATE-----`), concatenated in a single file.
+
+4. **`RefreshedX509ExtendedKeyManager` is initialized at startup** — `HttpClientService.createClient()` is called lazily (Guava `LoadingCache`) on the first request to a named instance. It calls `secretsSupplier.get().getKeyManager(purpose)` which constructs a `RefreshedX509ExtendedKeyManager`. That constructor calls `refreshKeyManager.get()` immediately and caches the result. If the cert file does not exist at that moment, the `KeyManager` holds an empty/null state. `setNeedsReload()` is only triggered by `SecretLabelListener.secretStoreMappingHasChanged()` — which fires when a secret store **mapping** changes. Because `FileSystemSecretStore` has no mappings (the `/mappings` REST sub-resource returns 404 for this store type), a store config change (e.g. format update) never triggers a reload. **An AM restart is required** to pick up cert files that were written after the service first loaded.
+
+### What Was Wrong and What Fixed It
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 1 | Format was `PLAIN` — AM could not parse the PEM bundle as a key+cert | Changed `"format"` to `"PEM"` in both `esv.json` (global store, Gitea) and the new alpha realm store FBC file |
+| 2 | Files were named after the short alias (`wxaclientcrtmtls`, `esv-mtls-client-cert-wajih-dev4`) — AM looked for the full secretId | Wrote files named `am.services.httpclient.mtls.clientcert.wxaclientcrtmtls.secret` and `am.services.httpclient.mtls.clientcert.clientcrtmtls.secret` into the PVC |
+| 3 | `esv-secrets` was an `emptyDir` — files were lost on every AM restart, so the `KeyManager` always initialized with an empty store | Replaced with a dedicated 10Mi PVC (`am-esv-secrets`) mounted at `/home/forgerock/openam/esv-secrets/`; files now survive indefinitely |
+| 4 | `RefreshedX509ExtendedKeyManager` cached an empty `KeyManager` on first load (before files existed); no mapping-change event ever triggered a reload | AM restart after the correct files were in place caused `createClient()` to re-initialize with the cert present |
+
+### What Is Still Manual (Pending esv-shim Fix)
+
+The esv-shim currently writes PEM files using the ESV alias name (e.g. `esv-mtls-client-cert-wajih-dev4`). After each `apply-customer-configuration`, the correct full-secretId files must either exist from a previous run (they survive on the PVC) or be written manually. The pending fix is to update `_write_pem_secret_to_am()` in `docker/esv-shim/app/main.py` to derive the full secretId from the mapping ConfigMaps and write the file with that name instead.
+
+### FBC Files
+
+The `FileSystemSecretStore/ESV` store is now seeded via two FBC files checked into `kustomize/base/gitea-seed/am-conf/`:
+
+- `realm/root/filesystemsecretstore/1.0/globalconfig/default/esv.json` — global scope, `format: PEM`, `directory: /home/forgerock/openam/esv-secrets`
+- `realm/root-alpha/filesystemsecretstore/1.0/organizationconfig/default/esv.json` — alpha realm scope, same format and directory
+
+The alpha realm store is required because the `httpclient` service is realm-scoped and AM resolves secrets in realm context first. Both stores point at the same PVC directory.
+
+Step 10b in `mock-tenant.py` creates these stores via REST on a fresh deploy (before Gitea config is pushed); the Gitea FBC files ensure they persist through subsequent restarts.

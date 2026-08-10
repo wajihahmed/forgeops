@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -501,6 +502,7 @@ def restart_deployment(deployment_name: str) -> bool:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 def _escape_properties_value(value: str) -> str:
     """Escape a value for Java .properties format (backslash, then handle newlines)."""
     # Escape backslashes first, then newlines as \n (single line value)
@@ -508,6 +510,52 @@ def _escape_properties_value(value: str) -> str:
     value = value.replace("\n", "\\n")
     value = value.replace("\r", "\\r")
     return value
+
+
+# Mounted from PVC am-esv-secrets at /home/forgerock/openam/esv-secrets/ — outside
+# config/services/ so custom-vol-init never touches it. Files survive any AM restart.
+ESV_SECRETS_DIR = "/home/forgerock/openam/esv-secrets"
+
+
+def _write_pem_secret_to_am(esv_alias: str, pem_content: str):
+    """Write a PEM secret file into the AM pod's esv-secrets PVC mount.
+
+    Reverse-looks up the full secretId from mapping ConfigMaps so AM's
+    OrderedStableIdResolver can match the file by its stableId pattern.
+    """
+    from kubernetes.stream import stream as k8s_stream
+
+    # Reverse-lookup: find mapping CM whose aliases list contains esv_alias
+    cms = core_v1.list_namespaced_config_map(
+        NAMESPACE, label_selector=f"{TYPE_LABEL}=mapping"
+    ).items
+    secret_id = None
+    for cm in cms:
+        mapping_json = (cm.data or {}).get("mapping", "")
+        try:
+            mapping = json.loads(mapping_json)
+            if esv_alias in mapping.get("aliases", []):
+                secret_id = mapping.get("secretId")
+                break
+        except Exception:
+            continue
+    if not secret_id:
+        print(f"  WARNING: no mapping found for alias {esv_alias!r} — skipping PEM write")
+        return
+
+    pods = core_v1.list_namespaced_pod(NAMESPACE, label_selector="app=am").items
+    if not pods:
+        raise RuntimeError("No AM pod found — cannot write PEM secret")
+    pod_name = pods[0].metadata.name
+
+    escaped = pem_content.replace("'", "'\\''")
+    k8s_stream(
+        core_v1.connect_get_namespaced_pod_exec,
+        pod_name, NAMESPACE,
+        command=["sh", "-c", f"printf '%s' '{escaped}' > {ESV_SECRETS_DIR}/{secret_id}"],
+        stderr=False, stdin=False, stdout=True, tty=False,
+    )
+    print(f"  PEM secret written: {secret_id} (alias: {esv_alias})")
 
 
 def _mirror_am_to_gitea():
@@ -651,6 +699,21 @@ def do_restart():
 
     project_configmap(CATALINA_PROPERTIES_CM, {"catalina.properties": catalina_content})
     project_configmap(IDM_BOOT_PROPERTIES_CM, {"boot.properties": boot_content})
+
+    # Write PEM secrets to AM pod — all mapping CMs are in place by the time
+    # restart is called, so the alias→secretId reverse-lookup succeeds here.
+    pem_secrets = [
+        s for s in secrets
+        if (s.metadata.annotations or {}).get(ENCODING_ANNOTATION, "") == "pem"
+    ]
+    for s in pem_secrets:
+        alias = s.metadata.name[len(SECRET_PREFIX):]
+        try:
+            raw_b64 = (s.data or {}).get("value", "")
+            pem_content = base64.b64decode(raw_b64).decode("utf-8", errors="replace")
+            _write_pem_secret_to_am(alias, pem_content)
+        except Exception as exc:
+            print(f"WARNING: PEM secret file write to AM failed for {alias}: {exc}")
 
     try:
         _mirror_am_to_gitea()
