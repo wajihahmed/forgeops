@@ -30,8 +30,8 @@ This is a fork of [ForgeOps](https://github.com/ForgeRock/forgeops) — the open
 - **Alpha/bravo realms**: Pre-configured via FBC with Login trees, identity stores, and OAuth2 clients that match AIC's multi-realm model.
 - **Tenant shim**: A FastAPI service that emulates AIC's Environment Secrets & Variables REST API and other AIC-specific endpoints, enabling unmodified lodestar tooling to configure the local tenant.
 - **SaaS-compatible DS**: Custom schema, indexes, and security settings sourced from the production saas repo.
-- **`mock-tenant.py`**: A single automation script (`bin/mock-tenant.py`) with three subcommands: `bootstrap` installs cluster-wide prerequisites (once per OrbStack instance); `deploy` deploys the application stack (AM, IDM, DS, Gitea, tenant shim); `push-config` pushes updated config to Gitea and restarts the relevant pod.
-- **`gitea-seed.py`**: A utility script (`bin/gitea-seed.py`) with two roles: (1) `am-mirror` — mirrors the live AM root realm's tree/node config into Gitea-ready FBC files for the alpha/bravo realms; (2) `merge <managed|repo-ds|access>` subcommands — merges IDM config files from the saas repo into the ForgeOps-compatible static files committed under `kustomize/base/gitea-seed/idm-conf/`.
+- **`mock-tenant.py`**: A single automation script (`bin/mock-tenant.py`) with four subcommands: `bootstrap` installs cluster-wide prerequisites (once per OrbStack instance); `deploy` deploys the application stack (AM, IDM, DS, Gitea, tenant shim); `push-config` pushes updated config to Gitea and restarts the relevant pod; `seed-gitea` provides IDM config merging and AM config mirroring utilities for preparing Gitea seed repo content.
+- **`mock-tenant.py seed-gitea`**: The `seed-gitea` subcommand of `mock-tenant.py` prepares Gitea seed repo content with two roles: (1) `seed-gitea am-mirror` — mirrors the live AM root realm's tree/node config into Gitea-ready FBC files for the alpha/bravo realms; (2) `seed-gitea merge <managed|repo-ds|access>` — merges IDM config files from the saas repo into the ForgeOps-compatible static files committed under `kustomize/base/gitea-seed/idm-conf/`.
 - **`tunnel`**: A helper script (`bin/tunnel`) that port-forwards the nginx ingress controller's port 443 to localhost:443 (requires `sudo`), enabling browser access to `https://mock.iam.example.com` from your laptop/desktop.
 
 **Why ForgeOps instead of the saas repo:**
@@ -353,7 +353,7 @@ Secrets are reused so passwords don't change after recovery.
 
 ### push-config
 
-Pushes local config files into Gitea and restarts the relevant pod:
+Pushes the committed static config files from `kustomize/base/gitea-seed/` to Gitea and restarts the relevant pod. This is also called internally by `deploy` as its final step — there is no need to run it manually after a fresh deploy.
 
 ```sh
 # Push both AM and IDM
@@ -364,16 +364,39 @@ python3 bin/mock-tenant.py push-config --target am
 
 # Push only IDM config
 python3 bin/mock-tenant.py push-config --target idm
-
-# Re-sync IDM static files from the saas repo before pushing
-python3 bin/mock-tenant.py push-config --saasrepo-path /path/to/saas
 ```
 
-The `--saasrepo-path` option re-runs `bin/merge_idm_gitea-seed.py` against the saas patch files, diffs the result against the static files in `kustomize/base/gitea-seed/idm-conf/`, updates them on disk if different, and prints a reminder to review and commit. It does **not** auto-commit.
+**Relationship to `sync-saas` and `deploy`:**
+- `deploy` calls `push-config` internally as its final step — do not run them together manually after a fresh deploy.
+- `sync-saas` is a separate developer workflow for pulling in saas repo changes. Run it first, review and commit the updated static files, then run `push-config` to push them to Gitea.
+- `push-config` itself never touches the saas repo — it only pushes whatever is already committed to `kustomize/base/gitea-seed/`.
+
+### sync-saas
+
+Merges saas repo patch files into the local static config files in `kustomize/base/gitea-seed/`. Does **not** commit or push to Gitea — leaves the diff on disk for review.
+
+```sh
+# Merge using committed static files as the base (no cluster required)
+python3 bin/mock-tenant.py sync-saas --repo-path /path/to/saas
+
+# Merge using a live IDM pod as the base
+python3 bin/mock-tenant.py sync-saas --repo-path /path/to/saas --pod <idm-pod-name>
+```
+
+After running, review and commit the changes, then push to Gitea:
+
+```sh
+git diff kustomize/base/gitea-seed/idm-conf/
+git add kustomize/base/gitea-seed/idm-conf/
+git commit -m "Update merged IDM config from saas"
+python3 bin/mock-tenant.py push-config --target idm
+```
+
+`--target am`, `--target usr`, and `--target cts` are defined but not yet implemented.
 
 ### am-mirror
 
-`bin/gitea-seed.py am-mirror` mirrors the live AM root realm's tree and node config into `kustomize/base/gitea-seed/am-conf/` for alpha and bravo realms.
+`python3 bin/mock-tenant.py seed-gitea am-mirror` mirrors the live AM root realm's tree and node config into `kustomize/base/gitea-seed/am-conf/` for alpha and bravo realms.
 
 **Why it exists:** Files exported directly from AIC are in AIC's export format (no `metadata` block) and cause NPE in `ConfigEntityConverter` on ForgeOps AM. The ForgeOps root realm ships files with `metadata.uid` in the correct format. `am-mirror` copies root realm files and adapts the realm reference and uid, producing valid ForgeOps-format files.
 
@@ -388,7 +411,7 @@ The `--saasrepo-path` option re-runs `bin/merge_idm_gitea-seed.py` against the s
 **When to re-run:** when the Login tree structure changes (new nodes added).
 
 ```sh
-python3 bin/gitea-seed.py am-mirror --namespace fr-platform
+python3 bin/mock-tenant.py seed-gitea am-mirror --namespace fr-platform
 python3 bin/mock-tenant.py push-config --target am
 ```
 
@@ -396,7 +419,7 @@ python3 bin/mock-tenant.py push-config --target am
 
 Only whitelisted directories are included by `am-mirror`. The whitelist covers tree-node instance directories and a subset of realm service directories that produce ForgeOps-compatible files (with `metadata.uid`) when mirrored from the root realm. Service directories that are NOT whitelisted (e.g. `scriptingservice`, `iplanetamauthservice`) are excluded because their AIC export format lacks the `metadata` block and causes NPE in `ConfigEntityConverter` on ForgeOps AM.
 
-Current whitelist (`_AM_MIRROR_SAFE_DIRS` in `bin/gitea-seed.py`):
+Current whitelist (`_AM_MIRROR_SAFE_DIRS` in `bin/mock-tenant.py`):
 ```
 authenticationtreesservice    datastoredecisionnode         incrementlogincountnode
 pagenode                      innertreeevaluatornode        logincountdecisionnode
@@ -588,9 +611,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API and
 
 | File | Purpose |
 |---|---|
-| `bin/mock-tenant.py` | Full deploy/push-config/bootstrap automation |
-| `bin/gitea-seed.py` | IDM merge + AM mirror tool (`merge managed`, `merge repo-ds`, `merge access`, `am-mirror` subcommands) |
-| `bin/merge_idm_gitea-seed.py` | IDM config merge tool (called by `gitea-seed.py`) |
+| `bin/mock-tenant.py` | Full deploy/push-config/bootstrap/seed-gitea automation |
 | `bin/get_admin_tok.sh` | Fetches AM admin token via curl |
 | `bin/tunnel` | Port-forwards nginx 443 for browser access |
 | `mock-tenant.md` | This document |
@@ -717,7 +738,7 @@ Bring `managed.json` (adds `teammember`, `svcacct` types), `repo.ds.json` (LDAP 
 
 **Static files:** The merged outputs for `managed.json`, `repo.ds.json`, and `access.json` are committed as static files in `kustomize/base/gitea-seed/idm-conf/`. To re-sync when saas patch files change:
 ```sh
-python3 bin/mock-tenant.py push-config --saasrepo-path /path/to/saas
+python3 bin/mock-tenant.py sync-saas --repo-path /path/to/saas
 ```
 
 **Build notes:** Parts 1–4 require a `ds:local` rebuild and PVC wipe. Part 5 requires a DS rebuild (new OUs in `orgs.ldif`).
@@ -1007,6 +1028,26 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **keystore-create needs internet** — downloads a static `jq` binary from GitHub releases at runtime.
 
+### DS Schema and Index Sync from Saas
+
+The existing implementation is entirely **baked manually into the Docker image** — there is no automated sync from saas. Here is the full picture:
+
+| Mock-tenant file | Source in saas | How applied |
+|---|---|---|
+| `docker/ds/config/schema-mock-tenant/99-fraas-schema.ldif` | `services/userstore/setup-profiles/FRAAS/repo/7.0/schema/99-fraas-schema.ldif` | Verbatim copy — currently identical |
+| `docker/ds/saas-compat-config.sh` | `services/userstore/configuration/dsconfig-input` | Hand-ported subset (password schemes, global settings) — runs at Docker build time |
+| `docker/ds/runtime-scripts-mock-tenant/ds-idrepo/setup` | `services/userstore/configuration/dsconfig-input` (indexes, VLV, plugins) | Runs at pod first-boot on empty PVC |
+| `docker/ds/runtime-scripts-mock-tenant/ds-cts/setup` | `services/ctsstore/configuration/dsconfig-input` | Runs at pod first-boot on empty PVC |
+
+`sync-saas --target usr` and `--target cts` would need to diff the saas `dsconfig-input` files against the corresponding sections of `saas-compat-config.sh` and the `setup` runtime scripts, and update them — it is a non-trivial sync since the saas source is a flat `dsconfig` batch file and the mock-tenant splits it across build-time and runtime scripts.
+
+Things saas has that are **intentionally omitted** locally:
+- OpenTelemetry plugin configuration (requires otel-agent sidecar, not present locally)
+- ACL/access-log settings
+- ESV variable references (for Argon2/Scrypt memory pools — require ESV secrets infrastructure)
+- Disk threshold configuration (`config-init.sh` in both saas services — sets `disk-low-threshold`/`disk-full-threshold` per backend)
+- PBKDF2 iteration count override (`config-init.sh` userstore — sets `pbkdf2-iterations` from env var `USERSTORE_PBKDF2_ITERATIONS`)
+
 ### Gitea
 
 - **Gitea `DEFAULT_ADMIN_*` env vars don't work in gitea:1.22** — admin user is created via `lifecycle.postStart` hook as `su git -c 'gitea admin user create ...'`. If the hook runs as root (not `git`), user creation silently fails and the seed job crash-loops with every API call returning `401 Unauthorized`.
@@ -1029,7 +1070,7 @@ The `ds-idrepo` memory limit is set to 2Gi in `kustomize/overlay/mock-tenant/ds-
 
 - **`identityResource` must be set on every tree containing IDM nodes** — including inner trees. Not inherited from outer trees. See [identityResource on Inner Trees](#identityresource-on-inner-trees).
 
-- **`PatchObjectNode` (and other IDM node) instance files carry `managed/user` from the root realm** — AM validates that the node-level `identityResource` matches the tree-level one and throws `NodeProcessException: Configured identity resource for the node (managed/user) does not match the configured identity resource for the tree (managed/alpha_user)` if they differ. Node instance files mirrored from the root realm must have `identityResource` rewritten to `managed/{realm}_user`. `gitea-seed.py am-mirror` now does this automatically for `patchobjectnode`, `queryfilterdecisionnode`, `incrementlogincountnode`, and `logincountdecisionnode` instance files.
+- **`PatchObjectNode` (and other IDM node) instance files carry `managed/user` from the root realm** — AM validates that the node-level `identityResource` matches the tree-level one and throws `NodeProcessException: Configured identity resource for the node (managed/user) does not match the configured identity resource for the tree (managed/alpha_user)` if they differ. Node instance files mirrored from the root realm must have `identityResource` rewritten to `managed/{realm}_user`. `mock-tenant.py seed-gitea am-mirror` does this automatically for `patchobjectnode`, `queryfilterdecisionnode`, `incrementlogincountnode`, and `logincountdecisionnode` instance files.
 
 - **`/admin` URL (IDM Admin UI) is not available** — the IDM Admin UI at `/admin` was deprecated and removed from ForgeOps. Use `/platform` instead.
 
@@ -1267,6 +1308,18 @@ Option 1 is the lowest-friction path — no credential management, consistent wi
 ### 11. ~~Rename `esv-shim` to `tenant-shim`~~ ✓ DONE
 
 Completed 2026-08-10. All directories, image tags, YAML filenames, Kubernetes resource names, and string references renamed from `esv-shim` / `ESV Shim` to `tenant-shim` / `Tenant Shim`.
+
+### 13. Implement `sync-saas --target am` and `sync-saas --target ds`
+
+Both are currently stubs that raise `NotImplementedError`. Implement when saas AM or DS config diverges enough to warrant automated syncing.
+
+**`sync-saas --target am`** — sync AM config from the saas repo into `kustomize/base/gitea-seed/am-conf/`. Candidate sources in saas: OAuth2 provider config, scripting service settings, or other realm service configuration that is managed as patch files in the saas repo.
+
+**`sync-saas --target usr`** — sync userstore (ds-idrepo) schema/indexes/settings from the saas repo. The DS schema and index patches in saas (`services/userstore/setup-profiles/FRAAS/`) are currently applied manually via `Dockerfile.mock-tenant` and the DS runtime scripts. A `sync-saas --target usr` implementation would automate detecting when those patch files change and updating the corresponding files in this repo.
+
+**`sync-saas --target cts`** — sync CTS store (ds-cts) schema/indexes/settings from the saas repo. Similar scope to `--target usr` but for the CTS store configuration.
+
+See [DS Schema and Index Sync from Saas](#ds-schema-and-index-sync-from-saas) in Known Issues for a full breakdown of what is currently baked into the image, what is intentionally omitted, and what a sync implementation would need to cover.
 
 ### 8. Research: Get `IdentityStoreDecisionNode` into ForgeOps AM
 

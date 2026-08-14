@@ -5,12 +5,19 @@ mock-tenant.py — CLI for the ForgeOps mock-tenant dev stack.
 Commands:
   bootstrap                 Install cluster-wide prerequisites (once per cluster instance)
   deploy                    Deploy the application stack (AM, IDM, DS, Gitea, tenant shim) — requires bootstrap first
-  push-config               Push config to Gitea and restart pod(s)
+  push-config               Push static config files to Gitea and restart pod(s)
+  sync-saas                 Merge saas repo patches into local static config files (does not commit)
+  seed-gitea merge <managed|repo-ds|access> <base> <patch>
+                            Merge IDM config patch files into a base JSON file (stdout)
+  seed-gitea am-mirror      Mirror root realm tree/node config from a live AM pod into am-conf/
 
 Usage:
   python3 bin/mock-tenant.py [--context CONTEXT] bootstrap
   python3 bin/mock-tenant.py [--context CONTEXT] deploy [--force]
-  python3 bin/mock-tenant.py [--context CONTEXT] push-config [--target idm|am|all] [--saasrepo-path PATH]
+  python3 bin/mock-tenant.py [--context CONTEXT] push-config [--target idm|am|all]
+  python3 bin/mock-tenant.py sync-saas --repo-path PATH [--pod POD] [--target idm|am|usr|cts|all]
+  python3 bin/mock-tenant.py seed-gitea merge <managed|repo-ds|access> <base> <patch>
+  python3 bin/mock-tenant.py seed-gitea am-mirror [--namespace fr-platform] [--am-conf kustomize/base/gitea-seed/am-conf]
 
 --context defaults to "orbstack". Pass --context minikube (or set MOCK_TENANT_K8S_CONTEXT)
 for other local Kubernetes runtimes.
@@ -19,12 +26,15 @@ for other local Kubernetes runtimes.
 import argparse
 import json
 import os
+import re
 import secrets
 import shutil
 import string
 import subprocess
+import sys
 import tempfile
 import time
+from urllib.parse import unquote
 
 
 PLATFORM_FQDN = "mock.iam.example.com"
@@ -927,7 +937,7 @@ def cmd_deploy(args):
     # AM is restarted here only because both pods take similar time and the step already waits for
     # both; if deploy time ever needs to be optimised, the AM restart could be removed and IDM
     # could be restarted independently after step 11.
-    _push_config(target="all", saas_repo_path=None, force_restart=True)
+    _push_config(target="all", force_restart=True)
     _step_print_credentials()
     elapsed = time.monotonic() - _start
     mins, secs = divmod(int(elapsed), 60)
@@ -985,38 +995,42 @@ def _push_am(clone_dir):
     run(f"git -C {clone_dir} add am/")
 
 
-def _sync_idm_from_saas(saas_overrides_dir):
+def _sync_idm_from_saas(saas_overrides_dir, pod=None):
     """
-    Re-merge IDM config from the saas patch files and update the static files
-    in IDM_CONF_STATIC_DIR if different. Does not commit — leaves changes on
-    disk for the user to review and commit.
+    Merge IDM config from saas patch files into the static files in IDM_CONF_STATIC_DIR.
+
+    If pod is given, the base JSON is read from that live IDM pod via kubectl exec.
+    Otherwise the already-committed static files in IDM_CONF_STATIC_DIR are used as
+    the base (no cluster required).
+
+    Does not commit — leaves changes on disk for the user to review and commit.
     """
-    r = kubectl(
-        f"get pod -n {NAMESPACE} -l app=idm -o jsonpath='{{.items[0].metadata.name}}'",
-        capture=True,
-    )
-    idm_pod = r.stdout.strip().strip("'")
-    merge_script = os.path.join(os.path.dirname(__file__), "gitea-seed.py")
+    _merge_fns = {"managed": merge_managed, "repo-ds": merge_repo_ds, "access": merge_access}
     any_updated = False
 
     for subcommand, conf_file in _AIC_IDM_CONF_FILES:
         if subcommand is None:
             continue  # not a saas-merge target; managed directly in the repo
         print(f"  Syncing {conf_file} from saas...")
-        r = kubectl(
-            f"exec {idm_pod} -n {NAMESPACE} -- cat /opt/openidm/conf/{conf_file}",
-            capture=True,
-        )
-        with tempfile.NamedTemporaryFile(mode="w", suffix=f"-base-{conf_file}", delete=False) as f:
-            f.write(r.stdout)
-            base_tmp = f.name
 
-        r = run(
-            f"python3 {merge_script} merge {subcommand} {base_tmp} {saas_overrides_dir}/{conf_file}",
-            capture=True,
-        )
-        merged = r.stdout
-        os.unlink(base_tmp)
+        if pod:
+            r = kubectl(
+                f"exec {pod} -n {NAMESPACE} -- cat /opt/openidm/conf/{conf_file}",
+                capture=True,
+            )
+            base = json.loads(r.stdout)
+            print(f"    base: live pod {pod}")
+        else:
+            static_path = os.path.join(IDM_CONF_STATIC_DIR, conf_file)
+            with open(static_path) as f:
+                base = json.load(f)
+            print(f"    base: static file {static_path}")
+
+        with open(os.path.join(saas_overrides_dir, conf_file)) as f:
+            patches = json.load(f)
+
+        result = _merge_fns[subcommand](base, patches)
+        merged = json.dumps(result, indent=4)
 
         static_path = os.path.join(IDM_CONF_STATIC_DIR, conf_file)
         with open(static_path) as f:
@@ -1025,10 +1039,10 @@ def _sync_idm_from_saas(saas_overrides_dir):
         if merged.strip() != current.strip():
             with open(static_path, "w") as f:
                 f.write(merged)
-            print(f"  {conf_file} updated on disk ✓")
+            print(f"    {conf_file} updated on disk ✓")
             any_updated = True
         else:
-            print(f"  {conf_file} unchanged")
+            print(f"    {conf_file} unchanged")
 
     if any_updated:
         print(
@@ -1041,21 +1055,44 @@ def _sync_idm_from_saas(saas_overrides_dir):
         print("  All static IDM config files already up to date with saas ✓")
 
 
-def _push_config(target, saas_repo_path, force_restart=False):
+def _sync_am_from_saas(_saas_repo_path, _pod=None):
+    # TODO: sync AM config from saas repo into AM_CONF_STATIC_DIR
+    raise NotImplementedError("sync-saas --target am is not yet implemented")
+
+
+def _sync_usr_from_saas(_saas_repo_path, _pod=None):
+    # TODO: sync userstore (ds-idrepo) schema/indexes/settings from saas repo
+    raise NotImplementedError("sync-saas --target usr is not yet implemented")
+
+
+def _sync_cts_from_saas(_saas_repo_path, _pod=None):
+    # TODO: sync CTS store (ds-cts) schema/indexes/settings from saas repo
+    raise NotImplementedError("sync-saas --target cts is not yet implemented")
+
+
+def cmd_sync_saas(args):
+    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+    step("sync-saas", f"Sync config from saas repo (target: {args.target})")
+
+    saas_overrides_dir = os.path.join(args.repo_path, _SAAS_IDM_OVERRIDES_SUBPATH)
+    if not os.path.isdir(saas_overrides_dir):
+        raise SystemExit(
+            f"saas IDM overrides not found at: {saas_overrides_dir}\n"
+            f"Expected: {_SAAS_IDM_OVERRIDES_SUBPATH} within the saas repo."
+        )
+
+    if args.target in ("idm", "all"):
+        _sync_idm_from_saas(saas_overrides_dir, pod=args.pod)
+    if args.target in ("am", "all"):
+        _sync_am_from_saas(args.repo_path, args.pod)
+    if args.target in ("usr", "all"):
+        _sync_usr_from_saas(args.repo_path, args.pod)
+    if args.target in ("cts", "all"):
+        _sync_cts_from_saas(args.repo_path, args.pod)
+
+
+def _push_config(target, force_restart=False):
     """Core logic for the push-config command, also called by cmd_deploy."""
-
-    if saas_repo_path:
-        merge_script = os.path.join(os.path.dirname(__file__), "gitea-seed.py")
-        if target in ("idm", "all"):
-            saas_overrides_dir = os.path.join(saas_repo_path, _SAAS_IDM_OVERRIDES_SUBPATH)
-            if not os.path.isdir(saas_overrides_dir):
-                raise SystemExit(
-                    f"saas IDM overrides not found at: {saas_overrides_dir}\n"
-                    f"Expected: {_SAAS_IDM_OVERRIDES_SUBPATH} within the saas repo."
-                )
-            print(f"  --saasrepo-path given: syncing IDM static files from {saas_repo_path}")
-            _sync_idm_from_saas(saas_overrides_dir)
-
     targets = ("idm", "am") if target == "all" else (target,)
 
     with _gitea_portforward():
@@ -1076,7 +1113,375 @@ def _push_config(target, saas_repo_path, force_restart=False):
 def cmd_push_config(args):
     os.chdir(os.path.join(os.path.dirname(__file__), ".."))
     step("push-config", f"Push config to Gitea (target: {args.target})")
-    _push_config(target=args.target, saas_repo_path=args.saasrepo_path)
+    _push_config(target=args.target)
+
+
+# ---------------------------------------------------------------------------
+# seed subcommand — IDM config merging and AM config mirroring
+# ---------------------------------------------------------------------------
+
+# ── managed.json helpers ──────────────────────────────────────────────────────
+
+def _managed_extract_name(field):
+    m = re.search(r'/objects\[/name eq "([^"]+)"\]', field)
+    if not m:
+        raise ValueError(f"Cannot parse filter field: {field!r}")
+    return m.group(1)
+
+
+def merge_managed(base, patches):
+    objects = base.get("objects", [])
+
+    for op in patches:
+        operation = op["operation"]
+        field = op["field"]
+
+        if operation == "remove":
+            name = _managed_extract_name(field)
+            before = len(objects)
+            objects = [o for o in objects if o.get("name") != name]
+            if len(objects) == before:
+                print(f"  skip remove: '{name}' not in base (ok)", file=sys.stderr)
+            else:
+                print(f"  removed: '{name}'", file=sys.stderr)
+
+        elif operation == "add" and field == "/objects/-":
+            value = op["value"]
+            name = value.get("name", "<unnamed>")
+            if any(o.get("name") == name for o in objects):
+                print(f"  skip add: '{name}' already present (idempotent)", file=sys.stderr)
+            else:
+                objects.append(value)
+                print(f"  added: '{name}'", file=sys.stderr)
+
+        else:
+            print(f"  WARNING: unsupported op '{operation}' on '{field}' — skipped",
+                  file=sys.stderr)
+
+    base["objects"] = objects
+    return base
+
+
+# ── repo.ds.json helpers ──────────────────────────────────────────────────────
+
+_REPO_DS_SKIP_PREFIXES = {"/ldapConnectionFactories"}
+
+
+def _parse_path(field):
+    """'/a/b%2Fc/d' -> ['a', 'b/c', 'd']"""
+    parts = field.lstrip("/").split("/")
+    return [unquote(p) for p in parts]
+
+
+def _set_path(doc, parts, value):
+    node = doc
+    for key in parts[:-1]:
+        if key not in node or not isinstance(node[key], dict):
+            node[key] = {}
+        node = node[key]
+    node[parts[-1]] = value
+
+
+def merge_repo_ds(base, patches):
+    for op in patches:
+        operation = op["operation"]
+        field = op["field"]
+
+        top = "/" + field.lstrip("/").split("/")[0]
+        if top in _REPO_DS_SKIP_PREFIXES:
+            print(f"  skip (connection config): {field}", file=sys.stderr)
+            continue
+
+        if operation in ("replace", "add"):
+            parts = _parse_path(field)
+            _set_path(base, parts, op["value"])
+            print(f"  {operation}: {field}", file=sys.stderr)
+        else:
+            print(f"  WARNING: unsupported op '{operation}' on '{field}' — skipped",
+                  file=sys.stderr)
+
+    return base
+
+
+# ── access.json helpers ───────────────────────────────────────────────────────
+
+def _parse_array_filter(field):
+    m = re.match(r'/?(\w+)\[(.+)\]$', field.strip())
+    if m:
+        return m.group(1), m.group(2)
+    key = field.lstrip("/").split("[")[0].rstrip("/-")
+    return key, None
+
+
+def _matches_filter(item, filter_str):
+    """Evaluate an IDM array-filter expression (eq, co, and) against a dict."""
+    conditions = re.split(r'\s+and\s+', filter_str, flags=re.IGNORECASE)
+    for cond in conditions:
+        cond = cond.strip()
+        m = re.match(r'/(\S+)\s+(eq|co)\s+"([^"]*)"', cond)
+        if not m:
+            print(f"  WARNING: unparseable filter condition: {cond!r}", file=sys.stderr)
+            return False
+        field, operator, value = m.group(1), m.group(2), m.group(3)
+        item_val = str(item.get(field, ""))
+        if operator == "eq" and item_val != value:
+            return False
+        if operator == "co" and value not in item_val:
+            return False
+    return True
+
+
+def merge_access(base, patches):
+    configs = base.get("configs", [])
+
+    for op in patches:
+        operation = op["operation"]
+        field = op.get("field", "")
+
+        if operation == "remove":
+            array_key, filter_str = _parse_array_filter(field)
+            if array_key != "configs" or not filter_str:
+                print(f"  WARNING: unsupported remove target '{field}' — skipped",
+                      file=sys.stderr)
+                continue
+            before = len(configs)
+            configs = [c for c in configs if not _matches_filter(c, filter_str)]
+            removed = before - len(configs)
+            print(f"  remove {removed} entry(s) matching: {filter_str}", file=sys.stderr)
+
+        elif operation == "replace":
+            array_key, filter_str = _parse_array_filter(field)
+            if array_key != "configs" or not filter_str:
+                print(f"  WARNING: unsupported replace target '{field}' — skipped",
+                      file=sys.stderr)
+                continue
+            replaced = False
+            for i, item in enumerate(configs):
+                if _matches_filter(item, filter_str):
+                    configs[i] = op["value"]
+                    replaced = True
+                    break
+            if replaced:
+                print(f"  replaced entry matching: {filter_str}", file=sys.stderr)
+            else:
+                print(f"  skip replace: no entry matched: {filter_str}", file=sys.stderr)
+
+        elif operation == "append":
+            elements = op.get("elements", [])
+            added = 0
+            for elem in elements:
+                if elem in configs:
+                    print(f"  skip append: entry already present (idempotent): "
+                          f"{json.dumps(elem, separators=(',', ':'))[:80]}",
+                          file=sys.stderr)
+                else:
+                    configs.append(elem)
+                    added += 1
+            if added:
+                print(f"  appended {added} new entries ({len(elements)-added} already present)",
+                      file=sys.stderr)
+
+        else:
+            print(f"  WARNING: unsupported op '{operation}' on '{field}' — skipped",
+                  file=sys.stderr)
+
+    base["configs"] = configs
+    return base
+
+
+# ── am-mirror helpers ─────────────────────────────────────────────────────────
+
+_AM_MIRROR_SAFE_DIRS = {
+    "authenticationtreesservice",
+    "pagenode",
+    "validatedusernamenode",
+    "validatedpasswordnode",
+    "identitystoredecisionnode",
+    "datastoredecisionnode",
+    "incrementlogincountnode",
+    "innertreeevaluatornode",
+    "retrylimitdecisionnode",
+    "accountlockoutnode",
+    "logincountdecisionnode",
+    "queryfilterdecisionnode",
+    "patchobjectnode",
+    "attributecollectornode",
+    "sunidentityrepositoryservice",
+    "oauth2provider",
+    "idmintegrationservice",
+    "amrealmbaseurl",
+    "selfservicetrees",
+    "socialidentityproviders",
+    "validationservice",
+}
+
+_AM_MIRROR_REALMS = ("alpha", "bravo")
+_AM_ROOT_UID_SUFFIX = "ou=am-config"
+
+
+def _am_mirror_get_pod(namespace):
+    r = subprocess.run(
+        ["kubectl", "get", "pod", "-n", namespace, "-l", "app=am",
+         "-o", "jsonpath={.items[0].metadata.name}"],
+        capture_output=True, text=True, check=True,
+    )
+    return r.stdout.strip()
+
+
+def _am_mirror_copy_root(am_pod, namespace, tmpdir):
+    root_path = "/home/forgerock/openam/config/services/realm/root"
+    dst = os.path.join(tmpdir, "root")
+    subprocess.run(
+        ["kubectl", "cp", "-n", namespace, f"{am_pod}:{root_path}", dst],
+        check=True,
+    )
+    return dst
+
+
+def _am_mirror_patch_idrepo(data, realm):
+    base_dn = f"o={realm},o=root,ou=identities"
+    for section in data.values():
+        if not isinstance(section, dict):
+            continue
+        if "sun-idrepo-ldapv3-config-organization_name" in section:
+            section["sun-idrepo-ldapv3-config-organization_name"] = base_dn
+        if "sun-idrepo-ldapv3-config-psearchbase" in section:
+            section["sun-idrepo-ldapv3-config-psearchbase"] = base_dn
+        if "sun-idrepo-ldapv3-config-people-container-value" in section:
+            section["sun-idrepo-ldapv3-config-people-container-value"] = "user"
+
+
+def _am_mirror_realm(root_dir, realm, am_conf_dir):
+    dst_realm = os.path.join(am_conf_dir, "realm", f"root-{realm}")
+    realm_suffix = f"o={realm},ou=services,ou=am-config"
+    written = 0
+
+    for dirpath, _, filenames in os.walk(root_dir):
+        rel_dir = os.path.relpath(dirpath, root_dir)
+        parts = rel_dir.split(os.sep)
+        top = parts[0]
+        if top not in _AM_MIRROR_SAFE_DIRS:
+            continue
+
+        for fname in filenames:
+            if not fname.endswith(".json"):
+                continue
+            if fname == "default.json" and parts[-1] == "organizationconfig":
+                continue
+
+            src = os.path.join(dirpath, fname)
+            dst = os.path.join(dst_realm, rel_dir, fname)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+            with open(src) as f:
+                doc = json.load(f)
+
+            raw = json.dumps(doc)
+            raw = raw.replace('"realm" : "/"', f'"realm" : "/{realm}"')
+            raw = raw.replace('"realm": "/"', f'"realm": "/{realm}"')
+            raw = raw.replace(_AM_ROOT_UID_SUFFIX, realm_suffix)
+            doc = json.loads(raw)
+
+            if (top == "sunidentityrepositoryservice"
+                    and fname == "opendj.json"
+                    and isinstance(doc.get("data"), dict)):
+                _am_mirror_patch_idrepo(doc["data"], realm)
+
+            _IDM_NODES = {
+                "IncrementLoginCountNode", "LoginCountDecisionNode",
+                "PatchObjectNode", "QueryFilterDecisionNode",
+            }
+            if (top == "authenticationtreesservice"
+                    and doc.get("data", {}).get("nodes") is not None
+                    and "identityResource" not in doc["data"]):
+                nodes = doc["data"]["nodes"]
+                if any(n.get("nodeType") in _IDM_NODES for n in nodes.values()):
+                    doc["data"]["identityResource"] = f"managed/{realm}_user"
+
+            if (top in ("patchobjectnode", "queryfilterdecisionnode",
+                        "incrementlogincountnode", "logincountdecisionnode")
+                    and isinstance(doc.get("data"), dict)
+                    and doc["data"].get("identityResource") == "managed/user"):
+                doc["data"]["identityResource"] = f"managed/{realm}_user"
+
+            with open(dst, "w") as f:
+                json.dump(doc, f, indent=2)
+            written += 1
+
+    return written
+
+
+def _am_mirror_service_singletons(root_dir, realm, am_conf_dir):
+    realm_suffix = f"o={realm},ou=services,ou=am-config"
+    written = 0
+
+    for svc in _AM_MIRROR_SAFE_DIRS:
+        src = os.path.join(root_dir, svc, "1.0", "organizationconfig", "default.json")
+        if not os.path.exists(src):
+            continue
+
+        with open(src) as f:
+            content = f.read()
+
+        content = content.replace('"realm" : "/"', f'"realm" : "/{realm}"')
+        content = content.replace('"realm": "/"', f'"realm": "/{realm}"')
+        content = content.replace(_AM_ROOT_UID_SUFFIX, realm_suffix)
+
+        dst_dir = os.path.join(am_conf_dir, "realm", f"root-{realm}",
+                               svc, "1.0", "organizationconfig")
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, "default.json")
+
+        with open(dst, "w") as f:
+            f.write(content)
+        written += 1
+
+    return written
+
+
+def cmd_seed(args):
+    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+
+    if args.seed_command == "am-mirror":
+        print(f"Getting AM pod in namespace {args.namespace}...")
+        am_pod = _am_mirror_get_pod(args.namespace)
+        print(f"AM pod: {am_pod}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            print("Copying root realm config from AM pod...")
+            root_dir = _am_mirror_copy_root(am_pod, args.namespace, tmpdir)
+
+            for realm in _AM_MIRROR_REALMS:
+                print(f"\nMirroring root → {realm}...")
+                n = _am_mirror_realm(root_dir, realm, args.am_conf)
+                s = _am_mirror_service_singletons(root_dir, realm, args.am_conf)
+                print(f"  {n} instance files + {s} service singletons written")
+
+        print("\nDone. Push to Gitea with:")
+        print("  python3 bin/mock-tenant.py push-config --target am")
+
+    elif args.seed_command == "merge":
+        subcommand = args.merge_type
+        with open(args.base) as f:
+            base = json.load(f)
+        with open(args.patch) as f:
+            patches = json.load(f)
+
+        print(f"Subcommand: {subcommand}", file=sys.stderr)
+        print(f"Patch operations: {len(patches)}", file=sys.stderr)
+
+        if subcommand == "managed":
+            print(f"Base objects: {len(base.get('objects', []))}", file=sys.stderr)
+            result = merge_managed(base, patches)
+            print(f"Result objects: {len(result.get('objects', []))}", file=sys.stderr)
+        elif subcommand == "repo-ds":
+            result = merge_repo_ds(base, patches)
+        else:
+            print(f"Base configs: {len(base.get('configs', []))}", file=sys.stderr)
+            result = merge_access(base, patches)
+            print(f"Result configs: {len(result.get('configs', []))}", file=sys.stderr)
+
+        print(json.dumps(result, indent=4))
 
 
 # ---------------------------------------------------------------------------
@@ -1122,15 +1527,63 @@ def main():
         default="idm",
         help="Which component to push config for (default: idm)",
     )
-    pc.add_argument(
-        "--saasrepo-path",
+    # sync-saas
+    ss = sub.add_parser(
+        "sync-saas",
+        help="Merge saas repo patches into local static config files (does not commit)",
+    )
+    ss.add_argument(
+        "--repo-path",
         metavar="PATH",
+        required=True,
+        help="Path to the saas repo root",
+    )
+    ss.add_argument(
+        "--pod",
+        metavar="POD",
         default=None,
         help=(
-            "Path to the saas repo root. Re-merges IDM config from the saas patch "
-            f"files and updates {IDM_CONF_STATIC_DIR} if different "
-            "(does not auto-commit). No effect when --target=am."
+            "Name of a live IDM pod to use as the merge base. "
+            "If omitted, the committed static files are used as the base (no cluster required)."
         ),
+    )
+    ss.add_argument(
+        "--target",
+        choices=["idm", "am", "usr", "cts", "all"],
+        default="idm",
+        help="Which component to sync (default: idm). usr=userstore, cts=CTS store",
+    )
+
+    # seed-gitea
+    seed_p = sub.add_parser(
+        "seed-gitea",
+        help="Utilities for preparing Gitea seed repo content (IDM merge and AM mirror)",
+    )
+    seed_sub = seed_p.add_subparsers(dest="seed_command", required=True)
+
+    # seed merge
+    merge_p = seed_sub.add_parser(
+        "merge",
+        help="Merge IDM config patch file into a base JSON file (output to stdout)",
+    )
+    merge_p.add_argument(
+        "merge_type",
+        choices=["managed", "repo-ds", "access"],
+        help="IDM config file type to merge",
+    )
+    merge_p.add_argument("base", help="Path to base JSON file")
+    merge_p.add_argument("patch", help="Path to patch JSON file")
+
+    # seed am-mirror
+    mirror_p = seed_sub.add_parser(
+        "am-mirror",
+        help="Mirror root realm tree/node config from a live AM pod into am-conf/",
+    )
+    mirror_p.add_argument("--namespace", default="fr-platform")
+    mirror_p.add_argument(
+        "--am-conf",
+        default="kustomize/base/gitea-seed/am-conf",
+        metavar="DIR",
     )
 
     args = parser.parse_args()
@@ -1146,6 +1599,10 @@ def main():
         cmd_deploy(args)
     elif args.command == "push-config":
         cmd_push_config(args)
+    elif args.command == "sync-saas":
+        cmd_sync_saas(args)
+    elif args.command == "seed-gitea":
+        cmd_seed(args)
 
 
 if __name__ == "__main__":
