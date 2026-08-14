@@ -1056,17 +1056,56 @@ def _sync_idm_from_saas(saas_overrides_dir, pod=None):
 
 
 def _sync_am_from_saas(_saas_repo_path, _pod=None):
-    # TODO: sync AM config from saas repo into AM_CONF_STATIC_DIR
+    # TODO: implement automated AM config sync from saas repo.
+    #
+    # Manual steps (currently done by hand):
+    #   1. Review services/am/config/aic-overrides/ in the saas repo for any new or changed
+    #      service/realm config files that should be reflected in the alpha/bravo realm FBC.
+    #   2. Diff saas services/am/config/aic-overrides/services/realm/ against
+    #      kustomize/base/gitea-seed/am-conf/realm/root-alpha/ and root-bravo/.
+    #   3. Copy changed files into the appropriate FBC realm directory, then run
+    #      `python3 bin/mock-tenant.py push-config --target am` to push to Gitea.
+    #
+    # Complexity: AM FBC uses a realm-per-directory layout. Saas aic-overrides are realm-agnostic
+    # templates applied to all realms, so each file must be fanned out to root-alpha/ and root-bravo/.
+    # Some saas files reference ESV variables that must be replaced with local equivalents.
     raise NotImplementedError("sync-saas --target am is not yet implemented")
 
 
 def _sync_usr_from_saas(_saas_repo_path, _pod=None):
-    # TODO: sync userstore (ds-idrepo) schema/indexes/settings from saas repo
+    # TODO: implement automated DS userstore (ds-idrepo) sync from saas repo.
+    #
+    # Manual steps (currently done by hand when saas changes):
+    #   1. Schema (trivial — verbatim copy):
+    #      cp <saas>/services/userstore/setup-profiles/FRAAS/repo/7.0/schema/99-fraas-schema.ldif \
+    #         docker/ds/config/schema-mock-tenant/99-fraas-schema.ldif
+    #      Rebuild the ds:local Docker image after copying.
+    #
+    #   2. Indexes / VLV / plugins (medium effort):
+    #      Diff <saas>/services/userstore/configuration/dsconfig-input against the dsconfig
+    #      --batch block in docker/ds/runtime-scripts-mock-tenant/ds-idrepo/setup.
+    #      Update the setup script with any new/changed create-backend-index, create-vlv-index,
+    #      create-plugin, or set-backend-prop commands.
+    #      Exclude ACL changes, OpenTelemetry plugin, and any commands that reference ESV variables.
+    #      Rebuild the ds:local Docker image and wipe the PVC so setup re-runs on next pod start.
+    #
+    # Complexity: saas dsconfig-input is a flat 1031-line batch file; mock-tenant splits it across
+    # saas-compat-config.sh (build-time, backend-independent settings) and runtime-scripts (first-boot,
+    # after setup-profiles create the amIdentityStore/idmRepo/cfgStore backends). Any automated sync
+    # must partition new commands into the correct file.
     raise NotImplementedError("sync-saas --target usr is not yet implemented")
 
 
 def _sync_cts_from_saas(_saas_repo_path, _pod=None):
-    # TODO: sync CTS store (ds-cts) schema/indexes/settings from saas repo
+    # TODO: implement automated DS CTS store (ds-cts) sync from saas repo.
+    #
+    # Manual steps (currently done by hand when saas changes):
+    #   Diff <saas>/services/ctsstore/configuration/dsconfig-input against the dsconfig
+    #   --batch block in docker/ds/runtime-scripts-mock-tenant/ds-cts/setup.
+    #   Update the setup script with any new/changed set-backend-prop or index commands.
+    #   Rebuild the ds:local Docker image and wipe the CTS PVC so setup re-runs.
+    #
+    # Complexity: low — ctsstore/dsconfig-input is small (db-durability and a handful of settings).
     raise NotImplementedError("sync-saas --target cts is not yet implemented")
 
 
