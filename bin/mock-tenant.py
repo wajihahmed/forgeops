@@ -40,6 +40,7 @@ from urllib.parse import unquote
 PLATFORM_FQDN = "mock.iam.example.com"
 NAMESPACE = "fr-platform"
 K8S_CONTEXT = os.environ.get("MOCK_TENANT_K8S_CONTEXT", "orbstack")
+FORGEOPS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Static merged IDM config files committed to this repo — source of truth for Gitea.
 IDM_CONF_STATIC_DIR = "kustomize/base/gitea-seed/idm-conf"
@@ -883,7 +884,7 @@ def _step_bootstrap():
 
 
 def cmd_bootstrap(args):
-    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(FORGEOPS_ROOT)
     _step_bootstrap()
 
 
@@ -901,7 +902,7 @@ def _step_teardown():
 
 def cmd_deploy(args):
     _start = time.monotonic()
-    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(FORGEOPS_ROOT)
     r = kubectl(f"get namespace {NAMESPACE}", capture=True, check=False)
     if r.returncode == 0:
         if not args.force:
@@ -1072,28 +1073,35 @@ def _sync_am_from_saas(_saas_repo_path, _pod=None):
     raise NotImplementedError("sync-saas --target am is not yet implemented")
 
 
-def _sync_usr_from_saas(_saas_repo_path, _pod=None):
-    # TODO: implement automated DS userstore (ds-idrepo) sync from saas repo.
-    #
-    # Manual steps (currently done by hand when saas changes):
-    #   1. Schema (trivial — verbatim copy):
-    #      cp <saas>/services/userstore/setup-profiles/FRAAS/repo/7.0/schema/99-fraas-schema.ldif \
-    #         docker/ds/config/schema-mock-tenant/99-fraas-schema.ldif
-    #      Rebuild the ds:local Docker image after copying.
-    #
-    #   2. Indexes / VLV / plugins (medium effort):
-    #      Diff <saas>/services/userstore/configuration/dsconfig-input against the dsconfig
-    #      --batch block in docker/ds/runtime-scripts-mock-tenant/ds-idrepo/setup.
-    #      Update the setup script with any new/changed create-backend-index, create-vlv-index,
-    #      create-plugin, or set-backend-prop commands.
-    #      Exclude ACL changes, OpenTelemetry plugin, and any commands that reference ESV variables.
-    #      Rebuild the ds:local Docker image and wipe the PVC so setup re-runs on next pod start.
-    #
-    # Complexity: saas dsconfig-input is a flat 1031-line batch file; mock-tenant splits it across
-    # saas-compat-config.sh (build-time, backend-independent settings) and runtime-scripts (first-boot,
-    # after setup-profiles create the amIdentityStore/idmRepo/cfgStore backends). Any automated sync
-    # must partition new commands into the correct file.
-    raise NotImplementedError("sync-saas --target usr is not yet implemented")
+def _sync_usr_from_saas(saas_repo_path, _pod=None):
+    src_relative = "services/userstore/setup-profiles/FRAAS/repo/7.0/schema/99-fraas-schema.ldif"
+    dst_relative = "docker/ds/config/schema-mock-tenant/99-fraas-schema.ldif"
+    src = os.path.join(saas_repo_path, src_relative)
+    dst = os.path.join(FORGEOPS_ROOT, dst_relative)
+
+    if not os.path.isfile(src):
+        raise SystemExit(f"saas schema not found at: {src}")
+
+    with open(src) as f:
+        new = f.read()
+    try:
+        with open(dst) as f:
+            current = f.read()
+    except FileNotFoundError:
+        current = None
+
+    if new == current:
+        print(f"  {dst_relative} already up to date with saas ✓")
+    else:
+        shutil.copy2(src, dst)
+        print(f"  {dst_relative} updated from saas ✓")
+        print(
+            "\n  Schema file updated. Review and commit:\n"
+            f"    git diff {dst_relative}\n"
+            f"    git add {dst_relative}\n"
+            "    git commit -m 'Sync 99-fraas-schema.ldif from saas'\n"
+            "\n  Then rebuild the ds:local Docker image for the change to take effect."
+        )
 
 
 def _sync_cts_from_saas(_saas_repo_path, _pod=None):
@@ -1110,17 +1118,16 @@ def _sync_cts_from_saas(_saas_repo_path, _pod=None):
 
 
 def cmd_sync_saas(args):
-    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(FORGEOPS_ROOT)
     step("sync-saas", f"Sync config from saas repo (target: {args.target})")
 
-    saas_overrides_dir = os.path.join(args.repo_path, _SAAS_IDM_OVERRIDES_SUBPATH)
-    if not os.path.isdir(saas_overrides_dir):
-        raise SystemExit(
-            f"saas IDM overrides not found at: {saas_overrides_dir}\n"
-            f"Expected: {_SAAS_IDM_OVERRIDES_SUBPATH} within the saas repo."
-        )
-
     if args.target in ("idm", "all"):
+        saas_overrides_dir = os.path.join(args.repo_path, _SAAS_IDM_OVERRIDES_SUBPATH)
+        if not os.path.isdir(saas_overrides_dir):
+            raise SystemExit(
+                f"saas IDM overrides not found at: {saas_overrides_dir}\n"
+                f"Expected: {_SAAS_IDM_OVERRIDES_SUBPATH} within the saas repo."
+            )
         _sync_idm_from_saas(saas_overrides_dir, pod=args.pod)
     if args.target in ("am", "all"):
         _sync_am_from_saas(args.repo_path, args.pod)
@@ -1150,7 +1157,7 @@ def _push_config(target, force_restart=False):
 
 
 def cmd_push_config(args):
-    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(FORGEOPS_ROOT)
     step("push-config", f"Push config to Gitea (target: {args.target})")
     _push_config(target=args.target)
 
@@ -1479,7 +1486,7 @@ def _am_mirror_service_singletons(root_dir, realm, am_conf_dir):
 
 
 def cmd_seed(args):
-    os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+    os.chdir(FORGEOPS_ROOT)
 
     if args.seed_command == "am-mirror":
         print(f"Getting AM pod in namespace {args.namespace}...")
@@ -1539,6 +1546,15 @@ def main():
         help=(
             "Kubernetes context to use (default: orbstack). "
             "Can also be set via MOCK_TENANT_K8S_CONTEXT env var."
+        ),
+    )
+    parser.add_argument(
+        "--forgeops-path",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to the forgeops repo root (default: parent directory of this script). "
+            "Override when running this script from outside the forgeops repo."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1631,6 +1647,10 @@ def main():
     if args.context:
         global K8S_CONTEXT
         K8S_CONTEXT = args.context
+
+    if args.forgeops_path:
+        global FORGEOPS_ROOT
+        FORGEOPS_ROOT = os.path.abspath(args.forgeops_path)
 
     if args.command == "bootstrap":
         cmd_bootstrap(args)
