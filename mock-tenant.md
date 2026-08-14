@@ -1039,7 +1039,9 @@ The existing implementation is entirely **baked manually into the Docker image**
 | `docker/ds/runtime-scripts-mock-tenant/ds-idrepo/setup` | `services/userstore/configuration/dsconfig-input` (indexes, VLV, plugins) | Runs at pod first-boot on empty PVC |
 | `docker/ds/runtime-scripts-mock-tenant/ds-cts/setup` | `services/ctsstore/configuration/dsconfig-input` | Runs at pod first-boot on empty PVC |
 
-`sync-saas --target usr` and `--target cts` would need to diff the saas `dsconfig-input` files against the corresponding sections of `saas-compat-config.sh` and the `setup` runtime scripts, and update them — it is a non-trivial sync since the saas source is a flat `dsconfig` batch file and the mock-tenant splits it across build-time and runtime scripts.
+Row 1 (`99-fraas-schema.ldif`): pure verbatim copy — `sync-saas --target usr` would literally just `cp` the file from the saas repo path. No parsing needed.
+
+For rows 3 and 4, `sync-saas --target usr` and `--target cts` would need to diff the saas `dsconfig-input` files against the corresponding sections of `saas-compat-config.sh` and the `setup` runtime scripts, and update them — it is a non-trivial sync since the saas source is a flat `dsconfig` batch file and the mock-tenant splits it across build-time and runtime scripts.
 
 Things saas has that are **intentionally omitted** locally:
 - OpenTelemetry plugin configuration (requires otel-agent sidecar, not present locally)
@@ -1372,3 +1374,54 @@ The `FileSystemSecretStore/ESV` store is now seeded via two FBC files checked in
 The alpha realm store is required because the `httpclient` service is realm-scoped and AM resolves secrets in realm context first. Both stores point at the same PVC directory.
 
 Step 10b in `mock-tenant.py` creates these stores via REST on a fresh deploy (before Gitea config is pushed); the Gitea FBC files ensure they persist through subsequent restarts.
+
+
+---
+## Scratchpad
+
+`What is not in saas-compact-config.sh as comparted to the ds-input in saas repo`
+
+=> Here's the complete breakdown, grouped by why each block is absent:
+
+Missing, handled in runtime-scripts-mock-tenant/ds-idrepo/setup instead (can't run at build time — backends don't exist until setup-profile runs at pod startup):
+
+---
+* All create-backend-index --backend-name amIdentityStore entries (fr-attr-istr1-20, fr-attr-imulti1-5, fr-attr-idate1-5, fr-attr-iint1-5, fr-idm-* indexes, big-extensible indexes)
+* set-backend-prop --backend-name cfgStore --set index-entry-limit:20000
+* create-backend-index --backend-name cfgStore (sunKeyValue, sunserviceID)
+* create-virtual-attribute (root/alpha/bravo group memberURL)
+* set-virtual-attribute-prop isMemberOf
+* create-plugin unique-attribute (alpha/bravo username and application name)
+
+---
+Intentionally omitted:
+
+* set-plugin-prop OpenTelemetry — no otel-agent sidecar locally
+* argon2-memory-pool-size:"&{userstore.argon2.reserved.memory|...}" — ESV variable ref
+* scrypt-memory-pool-size:"&{userstore.scrypt.reserved.memory|...}" — ESV variable ref
+* Security relaxation block (unauthenticated-requests-policy, password policy secure settings) — already in mock-tenant-config.sh
+* Access log filtering (5 create-access-log-filtering-criteria + disable HTTP logger) — operational/observability, not needed locally
+
+---
+Present in saas but not in saas-compat-config.sh — worth evaluating for addition:
+
+* Global ACIs (set-access-control-handler-prop --add global-aci:...) — two entries: authenticated users read access, and user-visible operational attributes. These govern what authenticated LDAP clients can read. May matter for load test correctness.
+* Password validators (create-password-validator) — Upper/Lower/Numeric/Special character sets, sn/givenName attribute value, and min-length validators 8 through 64. These are pre-populated for IDM password policies to reference via REST. Not assigned to any policy by default, but load tests that exercise password policy validation would fail to find them if absent.
+* HTTP Identity Mapper (create-identity-mapper + set-http-authorization-mechanism-prop) — assigns a dedicated identity mapper to DS's HTTP BASIC auth mechanism, scoped to uid=admin and uid=monitor. Could matter for any tooling that authenticates to DS over HTTP.
+
+
+---
+what is the purpose of mock-tenant-config.sh and saas-compact-config.sh
+
+=> Two distinct concerns, intentionally separated:
+
+saas-compat-config.sh — "make this DS instance behave like the saas userstore"
+
+* Applies settings from the saas userstore/configuration/dsconfig-input that are backend-independent and safe to run at build time: password storage schemes (Argon2, Bcrypt, PBKDF2 variants, etc.), allow-pre-encoded-passwords, trust-transaction-ids, max request size, schema provider setting.
+* These are about production parity — the mock tenant needs to accept the same password hashes and behave the same way saas DS does.
+
+mock-tenant-config.sh — "make this DS instance usable for local dev"
+* Relaxes security settings that would be inappropriate in production but are needed locally: unauthenticated-requests-policy:allow, disables secure auth/password-change requirements and password validators.
+* Also patches base-entries.ldif with mock-tenant-orgs.ldif to inject the AIC-parity realm org hierarchy.
+These are local dev concessions — nothing from saas, intentionally not synced.
+* The separation is deliberate: if upstream ForgeOps changes ds-setup.sh, neither file conflicts with it. And the two concerns stay independently reviewable — if saas changes its password schemes, you touch only saas-compat-config.sh.
