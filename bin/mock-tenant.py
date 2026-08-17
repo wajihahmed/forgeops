@@ -833,6 +833,22 @@ def _step_bootstrap():
             timeout=180,
         )
     kubectl("rollout status daemonset/ingress-nginx-controller -n ingress-nginx --timeout=120s", timeout=130)
+
+    # Enable snippet annotations (required for AM/IDM ingress rules)
+    r = kubectl(
+        "get configmap ingress-nginx-controller -n ingress-nginx "
+        "-o jsonpath='{.data.allow-snippet-annotations}'",
+        capture=True, check=False,
+    )
+    if r.stdout.strip() != "true":
+        print("  Enabling ingress-nginx snippet annotations...")
+        kubectl(
+            "patch configmap ingress-nginx-controller -n ingress-nginx "
+            "--type merge "
+            "-p '{\"data\":{\"allow-snippet-annotations\":\"true\",\"annotations-risk-level\":\"Critical\"}}'",
+        )
+        kubectl("rollout restart daemonset/ingress-nginx-controller -n ingress-nginx")
+        kubectl("rollout status daemonset/ingress-nginx-controller -n ingress-nginx --timeout=90s", timeout=100)
     print("  nginx ingress ✓")
 
     # 5. mittwald kubernetes-secret-generator
