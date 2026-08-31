@@ -1,6 +1,7 @@
-- op: replace
-  path: /spec/ports/0/targetPort
-  value: http
+# Keep the base Service's targetPort (https → Tomcat connector 8081, scheme=https/secure=true).
+# The previous "replace targetPort: http" op routed traffic to the plaintext 8080 connector,
+# which made AM see requests as insecure (http://) behind TLS-terminating ingress and broke
+# SAML ACS URL validation ("Invalid Assertion Consumer Location specified").
 - op: replace
   path: /spec/ports/0/name
   value: http
