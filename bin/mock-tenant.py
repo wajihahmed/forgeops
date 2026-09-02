@@ -804,6 +804,14 @@ def _configure_ldap_decision_nodes(token):
             print(f"  {realm}/{node_id}: DS settings applied ✓")
 
 
+def _step_configure_ldap_decision_nodes():
+    step("11c", "Configure LdapDecisionNode DS settings for imported journeys")
+    kubectl(f"rollout status deployment/am -n {NAMESPACE} --timeout=300s", timeout=310)
+    admin_pw = kube_secret_value("am-env-secrets", "AM_PASSWORDS_AMADMIN_CLEAR")
+    token = _am_token(admin_pw)
+    _configure_ldap_decision_nodes(token)
+
+
 def _configure_scripting_whitelists(token):
     """Ensure script engines allow the IDM identity-repository bridge class.
 
