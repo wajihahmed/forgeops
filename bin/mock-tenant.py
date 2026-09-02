@@ -1110,7 +1110,7 @@ def cmd_deploy(args):
     # AM is restarted here only because both pods take similar time and the step already waits for
     # both; if deploy time ever needs to be optimised, the AM restart could be removed and IDM
     # could be restarted independently after step 11.
-    _push_config(target="all", force_restart=True)
+    _push_config_to_git(target="all", force_restart=True)
     _step_print_credentials()
     elapsed = time.monotonic() - _start
     mins, secs = divmod(int(elapsed), 60)
@@ -1309,11 +1309,42 @@ def cmd_sync_saas(args):
         _sync_cts_from_saas(args.repo_path, args.pod)
 
 
-def _push_config(target, force_restart=False):
+def _do_restart_via_shim():
+    """Restart AM/IDM the way the tenant-shim's POST /environment/restart does.
+
+    The tenant-shim (docker/tenant-shim/app/main.py, do_restart()) restarts AM and
+    IDM only AFTER first mirroring the live FBC config to Gitea — because
+    custom-vol-init repopulates /home/forgerock/openam/config/services from Gitea
+    on every pod boot, any REST-imported config not committed to Gitea is lost on
+    restart. A bare `kubectl rollout restart` skips that mirror and wipes live
+    config (e.g. LdapDecisionNode DS settings applied via REST).
+
+    This mirrors that contract from mock-tenant.py: call the shim's
+    /environment/restart endpoint, which mirrors to Gitea and then restarts
+    am + idm in one shot.
+    """
+    url = f"http://tenant-shim.{NAMESPACE}.svc.cluster.local:8080/environment/restart"
+    r = run(
+        f'curl -sk -X POST "{url}" -H "Content-Type: application/json" -d "{{}}"',
+        capture=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        raise SystemExit(f"tenant-shim /environment/restart failed:\n{r.stdout}\n{r.stderr}")
+    try:
+        result = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        print(f"  tenant-shim restart returned non-JSON: {r.stdout[:200]}")
+        return
+    print(f"  tenant-shim restart: {result}")
+
+
+def _push_config_to_git(target, force_restart=False):
     """Core logic for the push-config command, also called by cmd_deploy."""
     targets = ("idm", "am") if target == "all" else (target,)
 
     with _gitea_portforward():
+        needs_restart = False
         for t in targets:
             print(f"\n  --- {t} ---")
             work_fn = _push_idm if t == "idm" else _push_am
@@ -1322,16 +1353,22 @@ def _push_config(target, force_restart=False):
                 print(f"  {t} config pushed to Gitea ✓")
             else:
                 print(f"  {t} config unchanged in Gitea ✓")
-            if pushed or force_restart:
-                kubectl(f"rollout restart deployment/{t} -n {NAMESPACE}")
-                kubectl(f"rollout status deployment/{t} -n {NAMESPACE} --timeout=120s", timeout=130)
-                print(f"  {t} restarted ✓")
+            if pushed:
+                needs_restart = True
+        if needs_restart or force_restart:
+            # Restart via the tenant-shim instead of a bare `kubectl rollout restart`:
+            # the shim mirrors the live FBC config to Gitea BEFORE restarting AM/IDM, so
+            # REST-applied config (e.g. LdapDecisionNode DS settings from step 11c,
+            # scripting whitelists from step 11d) survives the custom-vol-init reseed.
+            # A bare rollout restart skips the mirror and wipes that config. The shim
+            # restarts am and idm together, so one call replaces both per-target restarts.
+            _do_restart_via_shim()
 
 
 def cmd_push_config(args):
     os.chdir(FORGEOPS_ROOT)
     step("push-config", f"Push config to Gitea (target: {args.target})")
-    _push_config(target=args.target)
+    _push_config_to_git(target=args.target)
 
 
 # ---------------------------------------------------------------------------

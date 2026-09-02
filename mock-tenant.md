@@ -319,11 +319,31 @@ Steps are numbered 0–15 internally. Key ordering constraints:
 
 11b. **Create idmAdminClient** — creates a public PKCE OAuth2 client in the root realm, used by the Admin UI.
 
+11c. **Configure LdapDecisionNode DS settings** — journeys imported from an AIC customer-config (e.g. the `inst` usecase) contain `IdentityStoreDecisionNode` nodes, which Lodestar's mock-tenant importer remaps to `LdapDecisionNode` on import (see [Why IdentityStoreDecisionNode Cannot Be Used](#why-identitystoredecisionnode-cannot-be-used)). The import creates the node instances but leaves their DS connection settings empty, which breaks tree preflight with "Node did not exist" / "Failed to find downstream inputs". This step queries every final `LdapDecisionNode` instance in alpha/bravo via AM REST and PUTs the full DS configuration:
+
+    | Setting | Value |
+    |---|---|
+    | `primaryServers` | `ds-idrepo-0.ds-idrepo:1636` |
+    | `secondaryServers` | `[]` |
+    | `ldapConnectionMode` | `LDAPS` |
+    | `trustAllServerCertificates` | `true` |
+    | `accountSearchBaseDn` | `o=<realm>,o=root,ou=identities` (derived per realm) |
+    | `searchFilterAttributes` | `uid`, `mail` (required — AM rejects the PUT without it) |
+    | `userProfileAttribute` | `uid` |
+    | `searchScope` | `SUBTREE` |
+    | `adminDn` / `adminPassword` | `uid=admin` / DS `dirmanager.pw`, read at runtime from the `ds-passwords` secret |
+
+    Idempotent: nodes whose settings are already complete are left untouched; only incomplete instances are PUT, and each PUT is verified with a follow-up GET. The DS password is never logged or committed.
+
+11d. **Whitelist the IDM identity-repository bridge for scripted nodes** — appends `org.forgerock.openam.scripting.idrepo.ScriptIdentityRepository` to the AM scripting whitelist for **both** the `SCRIPTED_DECISION_NODE` and `AUTHENTICATION_TREE_DECISION_NODE` engine contexts via AM REST. AIC-imported journeys (e.g. inst's `Find Main User` script) call `idRepository.getAttribute(...)`; `idRepository` is backed by that Java class, and without the whitelist entry AM's Rhino sandbox blocks it (`Classname failed to match whitelist`), which the script's `catch` swallows and the journey then fails with `NotFound` → 401. The whitelists live in AM's config store — editing the seeded `engineconfiguration.json` files directly has no runtime effect — so this must be a REST PUT. Idempotent (class appended only when missing), verified with a GET.
+
+    **Durability note:** the whitelists are not fully covered by the Gitea seed — the `AUTHENTICATION_TREE_DECISION_NODE` seed file is a stub. A fresh `deploy` always re-runs step 11d, but a restart outside a deploy may need the step re-run manually until the whitelist is made durable (see persistence notes in the Lodestar repo).
+
 12. **Verify FBC init containers** — checks `custom-vol-init` logs for `config-loader done` in both AM and IDM pods.
 
 13. **Health checks** — verifies AM (`/am/json/health/live`) and IDM (`/openidm/info/ping`) are up.
 
-14. **Push AM and IDM config** — `push-config --target all`: clones the customer-config Gitea repo, copies `kustomize/base/gitea-seed/am-conf/` into `am/services/` and IDM static files into `idm/conf/`, commits, and pushes. Restarts AM and IDM if anything changed.
+14. **Push AM and IDM config** — `push-config --target all`: clones the customer-config Gitea repo, copies `kustomize/base/gitea-seed/am-conf/` into `am/services/` and IDM static files into `idm/conf/`, commits, and pushes. Restarts AM and IDM via the tenant shim's `/environment/restart` (which mirrors live FBC config to Gitea first, preserving REST-applied steps 10/11/11c/11d — see [push-config](#push-config)).
 
     > **Why both the seed job and push-config are needed:**
     >
@@ -354,6 +374,8 @@ Secrets are reused so passwords don't change after recovery.
 ### push-config
 
 Pushes the committed static config files from `kustomize/base/gitea-seed/` to Gitea and restarts the relevant pod. This is also called internally by `deploy` as its final step — there is no need to run it manually after a fresh deploy.
+
+**Restart path — via the tenant shim, not `kubectl rollout restart`:** when a restart is needed, `_push_config_to_git()` calls `_do_restart_via_shim()`, which POSTs to the tenant shim's `/environment/restart` endpoint. That endpoint mirrors the live AM/IDM FBC config to Gitea **before** restarting the pods, so REST-applied config (LdapDecisionNode DS settings from step 11c, scripting whitelists from step 11d, realms, OAuth2 secrets) survives the `custom-vol-init` reseed. A bare `kubectl rollout restart` bypasses the mirror and wipes REST-applied config — avoid it; if you must use it, re-run `deploy` (or at least steps 11c/11d) afterwards. The shim restarts AM and IDM together in one call.
 
 ```sh
 # Push both AM and IDM
@@ -546,7 +568,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API and
 | `docker/config-loader/clone-and-copy.sh` | FBC init container script |
 | `docker/tenant-shim/Dockerfile` | Tenant shim image (python:3.12-slim + FastAPI + git) |
 | `docker/tenant-shim/requirements.txt` | Tenant shim Python dependencies |
-| `docker/tenant-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM and IDM config to Gitea before restart |
+| `docker/tenant-shim/app/main.py` | ESV-compatible API (PUT-upsert, valueBase64); mirrors live AM and IDM config to Gitea before restart; projects ESVs into `am-catalina-properties` |
 | `docker/ds/mock-tenant-config.sh` | Relaxes DS security settings for local dev |
 | `docker/ds/saas-compat-config.sh` | Applies saas-compatible DS settings at build time |
 | `docker/ds/Dockerfile.mock-tenant` | Two-stage DS build: inherits `ds:local-base`; copies mock-tenant runtime-scripts and runs mock-tenant/saas-compat config |
@@ -565,7 +587,6 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API and
 | `kustomize/base/gitea-seed/am-conf/` | AM FBC config files for alpha/bravo realms (~150 JSON files) |
 | `kustomize/base/gitea-seed/idm-conf/managed.json` | Merged IDM managed objects (saas-compatible) |
 | `kustomize/base/gitea-seed/idm-conf/repo.ds.json` | Merged IDM DS repo mappings |
-| `kustomize/base/gitea-seed/idm-conf/access.json` | IDM access policy |
 | `kustomize/base/gitea-seed/idm-script/teammember.js` | IDM teammember script |
 | `kustomize/base/tenant-shim/kustomization.yaml` | Tenant shim base kustomization |
 | `kustomize/base/tenant-shim/tenant-shim-deployment.yaml` | Tenant shim Deployment |
@@ -574,6 +595,8 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API and
 | `kustomize/base/tenant-shim/tenant-shim-rbac.yaml` | Tenant shim ServiceAccount + Role + RoleBinding (pods + pods/exec added for AM config mirror) |
 | `kustomize/base/tenant-shim/esv-projection-configmap.yaml` | Empty `esv-variables` ConfigMap (pre-created) |
 | `kustomize/base/tenant-shim/esv-projection-secret.yaml` | Empty `esv-secrets` Secret (pre-created) |
+
+> `idm-conf/access.json` is not a static file — it is baked into the gitea-seed Job's `seed.sh` ConfigMap (see [TODO #9c](#9-reduce-deploy-time-below-5-minutes)).
 
 **Kustomize — overlay/mock-tenant**
 
@@ -586,16 +609,22 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API and
 | `kustomize/overlay/mock-tenant/am/catalina-properties-cm.yaml` | `am-catalina-properties` ConfigMap — base Tomcat `catalina.properties` + ESV values appended by shim on restart |
 | `kustomize/overlay/mock-tenant/am/ingress-fqdn.yaml` | AM host/TLS → `mock.iam.example.com`; injects `x-forgerock-transactionid: $request_id` response header |
 | `kustomize/overlay/mock-tenant/am/service.yaml` | `targetPort: http` (was `https`) |
+| `kustomize/overlay/mock-tenant/am/am-fbc-pvc.yaml` + `fbc-pvc-patch.yaml` | PVC for `/home/forgerock/openam/config/services` (candidate for removal — see [TODO #12](#12-replace-am-fbc-pvc-with-emptydir)) |
 | `kustomize/overlay/mock-tenant/amster/amster-job.yaml` | Amster job: SSH key path fix (`id_rsa`) |
 | `kustomize/overlay/mock-tenant/idm/deployment.yaml` | `custom-vol-init` patch, `esv-variables`/`esv-secrets` envFrom |
 | `kustomize/overlay/mock-tenant/idm/ingress-fqdn.yaml` | IDM host/TLS → `mock.iam.example.com`; injects `x-forgerock-transactionid: $request_id` response header |
+| `kustomize/overlay/mock-tenant/idm/idm-fbc-pvc.yaml` + `fbc-pvc-patch.yaml` | IDM FBC PVC (same pattern as AM) |
 | `kustomize/overlay/mock-tenant/ig/deployment.yaml` | IG imagePullPolicy patch |
 | `kustomize/overlay/mock-tenant/ig/ingress-fqdn.yaml` | IG host/TLS → `mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/admin-ui/ingress-fqdn.yaml` | Admin UI host/TLS → `mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/end-user-ui/ingress-fqdn.yaml` | End-user UI host/TLS → `mock.iam.example.com` |
 | `kustomize/overlay/mock-tenant/login-ui/ingress-fqdn.yaml` | Login UI host/TLS → `mock.iam.example.com` |
+| `kustomize/overlay/mock-tenant/idm/boot-properties-cm.yaml` | `idm-boot-properties` ConfigMap — IDM repo/userstore connection properties for the local DS |
+| `kustomize/overlay/mock-tenant/am/esv-secrets-pvc.yaml` | PVC backing AM's `esv-secrets` FBC directory (PEM secret writes survive restarts) |
+| `kustomize/overlay/mock-tenant/am/esv-secrets-volume-patch.yaml` | Mounts the `esv-secrets` PVC into the AM Deployment |
 | `kustomize/overlay/mock-tenant/tls/certificate.yaml` | cert-manager ClusterIssuer + Certificate (`platform-tls`) |
 | `kustomize/overlay/mock-tenant/keystore-create/keystore-type-patch.yaml` | jq download + `KEYSTORE_TYPE=jceks` fix |
+| `kustomize/overlay/mock-tenant/keystore-create/cluster-role-name.yaml` | Namespaces the `keystore-create` ClusterRoleBinding to `fr-platform` |
 | `kustomize/overlay/mock-tenant/keystore-create/role-binding.yaml` | Namespace patch: `prod` → `fr-platform` |
 | `kustomize/overlay/mock-tenant/ds-set-passwords/image-pull-policy.yaml` | `imagePullPolicy: IfNotPresent` for `ds:local` |
 | `kustomize/overlay/mock-tenant/ds-idrepo/sts.yaml` | `storageClassName: local-path`; memory 2Gi; `imagePullPolicy: IfNotPresent` |
@@ -611,7 +640,7 @@ FastAPI service that emulates AIC's Environment Secrets & Variables REST API and
 
 | File | Purpose |
 |---|---|
-| `bin/mock-tenant.py` | Full deploy/push-config/bootstrap/seed-gitea automation |
+| `bin/mock-tenant.py` | Full deploy/push-config/bootstrap/seed-gitea automation; post-import steps 11c (LdapDecisionNode DS settings) and 11d (scripting whitelists); `push-config`/deploy restarts go via the tenant shim (`_do_restart_via_shim()`) so live FBC config is mirrored to Gitea before the reseed |
 | `bin/get_admin_tok.sh` | Fetches AM admin token via curl |
 | `bin/tunnel` | Port-forwards nginx 443 for browser access |
 | `mock-tenant.md` | This document |
@@ -666,9 +695,15 @@ java.lang.IllegalArgumentException: Unsupported node type IdentityStoreDecisionN
 ```
 This makes the Login tree return 500 and fail to render in the UI entirely.
 
-**The workaround:** The `identityResource` field on the tree definition (not on any node) tells AM which managed object to associate with the session. Setting `"identityResource": "managed/alpha_user"` in `login.json` at the tree level achieves the same shared-state population. The Login trees in `kustomize/base/gitea-seed/am-conf/realm/root-alpha/` and `root-bravo/` use `DataStoreDecisionNode` with `identityResource` set on the tree.
+**The workaround for the core Login tree:** The `identityResource` field on the tree definition (not on any node) tells AM which managed object to associate with the session. Setting `"identityResource": "managed/alpha_user"` in `login.json` at the tree level achieves the same shared-state population. The Login trees in `kustomize/base/gitea-seed/am-conf/realm/root-alpha/` and `root-bravo/` use `DataStoreDecisionNode` with `identityResource` set on the tree.
 
 **Do NOT add `identitystoredecisionnode` to `_AM_MIRROR_SAFE_DIRS`** — it only exists in AIC, not in ForgeOps AM.
+
+**Remapping for AIC-imported journeys (e.g. the `inst` usecase):** trees that arrive via Lodestar's `apply-customer-configuration` keep their `IdentityStoreDecisionNode` nodes, which the ForgeOps AM cannot load. Lodestar's mock-tenant importer (`shared/lib/tenant/tenant_config_importer.py`, `_MOCK_TENANT_NODE_TYPE_REMAP`) remaps them on import to **`LdapDecisionNode`** (exact mixed case — AM resolves node types by class simple name; `LDAPDecisionNode` is rejected with "Unsupported node type"). `org.forgerock.openam.auth.nodes.LdapDecisionNode` ships in the AM image's `auth-nodes-8.1.1.jar` and has the same five uppercase outcomes as the source node (`TRUE`, `FALSE`, `LOCKED`, `CANCELLED`, `EXPIRED`), so connection keys and destination IDs pass through unchanged. `LdapDecisionNode` is also the closer semantic match: like `IdentityStoreDecisionNode` it authenticates the submitted username/password directly against the identity store.
+
+Imported instances are created with empty DS connection settings, so the ForgeOps side applies the settings post-import — `mock-tenant.py` deploy step 11c (see the deploy guide above). The node instance IDs stay whatever the import created; nothing needs to be committed to `kustomize/base/gitea-seed/am-conf/` for this remap.
+
+**Replacing the node entirely (custom auth node jar) is no longer worth researching** — the `LdapDecisionNode` remap gives outcome-compatible behaviour through the stock AM image. If a future AIC node type has no ForgeOps equivalent, revisit: the AIC jar containing the node could be added to the image, or a custom node written.
 
 ### identityResource on Inner Trees
 
@@ -697,7 +732,7 @@ The Lodestar/Pyrock `idc.login` load test authenticates against the alpha realm 
 |---|---|---|
 | `500 "No authentication trees service found"` | FIXED | uid suffix `ou=` → `o=` in `am-mirror` |
 | `500 NodeProcessException: Node did not exist` | FIXED | `FBC_BASE_PATHS` two-path + service singletons |
-| `IllegalArgumentException: Unsupported node type IdentityStoreDecisionNode` | FIXED | Reverted to `DataStoreDecisionNode` + `identityResource` on tree |
+| `IllegalArgumentException: Unsupported node type IdentityStoreDecisionNode` | FIXED | Core Login tree: `DataStoreDecisionNode` + `identityResource` on tree. AIC-imported journeys: remapped to `LdapDecisionNode` by Lodestar's importer + step 11c DS settings |
 | `IncrementLoginCountNode: No object to increment` | FIXED | `identityResource: managed/alpha_user` on Login tree |
 | `LoginCountDecisionNode: Failed to retrieve existing object` | FIXED | `identityResource` on inner trees (ProgressiveProfile etc.) |
 | `invalid_client` on OAuth2 endpoints | FIXED | `IDM_PROVISIONING_CLIENT_SECRET` regenerated alphanumeric-only |
@@ -1068,7 +1103,9 @@ Things saas has that are **intentionally omitted** locally:
 
 - **AM `PUT` for OAuth2 clients requires flat attribute object** — the grouped shape from `GET` (`coreOAuth2ClientConfig`, `advancedOAuth2ClientConfig`, etc.) is rejected with `Invalid attribute specified.` Must flatten all groups into a single object before PUT.
 
-- **`IdentityStoreDecisionNode` is AIC-only** — see [Why IdentityStoreDecisionNode Cannot Be Used](#why-identitystoredecisionnode-cannot-be-used).
+- **`IdentityStoreDecisionNode` is AIC-only** — the core Login tree uses `DataStoreDecisionNode` + `identityResource`; AIC-imported journeys remap to `LdapDecisionNode` (Lodestar importer) with DS settings applied post-import by deploy step 11c. See [Why IdentityStoreDecisionNode Cannot Be Used](#why-identitystoredecisionnode-cannot-be-used).
+
+- **AM scripting whitelists (`ScriptIdentityRepository`) are NOT durable across a non-deploy reseed** — `idRepository` in AIC-imported scripts needs `org.forgerock.openam.scripting.idrepo.ScriptIdentityRepository` in the whitelist of both `SCRIPTED_DECISION_NODE` and `AUTHENTICATION_TREE_DECISION_NODE` engine contexts. Applied via AM REST by deploy step 11d. The tenant-shim restart mirror only snapshots `realm/root-alpha|root-bravo` — the global `scriptingservice` engine configs under `realm/root` are NOT mirrored, so a restart outside `deploy` (which always re-runs 11d) can lose the whitelist and scripted nodes fail with `Classname failed to match whitelist`. Re-run `python3 bin/mock-tenant.py deploy` (or just step 11d) after such a restart.
 
 - **`identityResource` must be set on every tree containing IDM nodes** — including inner trees. Not inherited from outer trees. See [identityResource on Inner Trees](#identityresource-on-inner-trees).
 
@@ -1322,12 +1359,6 @@ Both are currently stubs that raise `NotImplementedError`. Implement when saas A
 **`sync-saas --target cts`** — sync CTS store (ds-cts) schema/indexes/settings from the saas repo. Similar scope to `--target usr` but for the CTS store configuration.
 
 See [DS Schema and Index Sync from Saas](#ds-schema-and-index-sync-from-saas) in Known Issues for a full breakdown of what is currently baked into the image, what is intentionally omitted, and what a sync implementation would need to cover.
-
-### 8. Research: Get `IdentityStoreDecisionNode` into ForgeOps AM
-
-`IdentityStoreDecisionNode` is AIC-only and does not exist in the ForgeOps AM image. Using it causes `IllegalArgumentException: Unsupported node type IdentityStoreDecisionNode` — see the [Known Issues section](#why-identitystoredecisionnode-cannot-be-used) for the current workaround (`DataStoreDecisionNode` + `identityResource` on the tree).
-
-Research whether the node can be introduced into ForgeOps AM (e.g. via a custom auth node jar, or by identifying which AIC AM jar contains it and adding it to the image). If feasible, this would allow closer parity with AIC Login trees without the `identityResource` workaround.
 
 ---
 
