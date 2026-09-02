@@ -744,18 +744,20 @@ def _configure_ldap_decision_nodes(token):
     """
     ds_password = kube_secret_value("ds-passwords", "dirmanager.pw")
 
-    required = {
-        "primaryServers": ["ds-idrepo-0.ds-idrepo:1636"],
-        "secondaryServers": [],
-        "ldapConnectionMode": "LDAPS",
-        "trustAllServerCertificates": True,
-        "accountSearchBaseDn": ["o=alpha,o=root,ou=identities"],
-        "searchFilterAttributes": ["uid", "mail"],
-        "userProfileAttribute": "uid",
-        "searchScope": "SUBTREE",
-    }
-
     for realm in ("alpha", "bravo"):
+        required = {
+            "primaryServers": ["ds-idrepo-0.ds-idrepo:1636"],
+            "secondaryServers": [],
+            "ldapConnectionMode": "LDAPS",
+            "trustAllServerCertificates": True,
+            # Each realm's users live under their own naming context in DS
+            # (o=<realm>,o=root,ou=identities), so the search base must match
+            # the realm the node is defined in.
+            "accountSearchBaseDn": [f"o={realm},o=root,ou=identities"],
+            "searchFilterAttributes": ["uid", "mail"],
+            "userProfileAttribute": "uid",
+            "searchScope": "SUBTREE",
+        }
         base = f"https://{PLATFORM_FQDN}/am/json/{realm}/realm-config/authentication/authenticationtrees/nodes/LdapDecisionNode"
         r = run(
             f'curl -sk "{base}?_queryFilter=true" '
