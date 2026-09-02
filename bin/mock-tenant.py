@@ -728,6 +728,90 @@ def _step_create_pkce_client():
     print(f"  {client_id} created/updated ✓")
 
 
+def _configure_ldap_decision_nodes(token):
+    """Ensure every imported LdapDecisionNode instance has working DS settings.
+
+    Journeys imported from the AIC source (e.g. the inst usecase) can contain
+    IdentityStoreDecisionNode nodes that get remapped to LdapDecisionNode on
+    import. The import creates the node instances but leaves their DS
+    connection settings empty, which makes the journeys fail tree preflight
+    with "Failed to find downstream inputs". This step fills in the missing
+    settings for every final LdapDecisionNode instance found in alpha/bravo.
+
+    Idempotent: existing nodes with complete settings are left untouched;
+    missing/incomplete nodes are PUT with the full DS configuration. The DS
+    bind password is read from the cluster secret at runtime and never logged.
+    """
+    ds_password = kube_secret_value("ds-passwords", "dirmanager.pw")
+
+    required = {
+        "primaryServers": ["ds-idrepo-0.ds-idrepo:1636"],
+        "secondaryServers": [],
+        "ldapConnectionMode": "LDAPS",
+        "trustAllServerCertificates": True,
+        "accountSearchBaseDn": ["o=alpha,o=root,ou=identities"],
+        "searchFilterAttributes": ["uid", "mail"],
+        "userProfileAttribute": "uid",
+        "searchScope": "SUBTREE",
+    }
+
+    for realm in ("alpha", "bravo"):
+        base = f"https://{PLATFORM_FQDN}/am/json/{realm}/realm-config/authentication/authenticationtrees/nodes/LdapDecisionNode"
+        r = run(
+            f'curl -sk "{base}?_queryFilter=true" '
+            f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: protocol=2.0,resource=1.0"',
+            capture=True,
+        )
+        nodes = json.loads(r.stdout).get("result", [])
+        if not nodes:
+            print(f"  {realm}: no LdapDecisionNode instances — skipping")
+            continue
+        for node in nodes:
+            node_id = node.get("_id")
+            incomplete = any(not node.get(field) for field in (
+                "primaryServers", "accountSearchBaseDn", "searchFilterAttributes",
+            ))
+            if not incomplete:
+                print(f"  {realm}/{node_id}: settings already present ✓")
+                continue
+            payload = dict(node)
+            payload.pop("_rev", None)
+            payload.update(required)
+            payload["adminDn"] = "uid=admin"
+            payload["adminPassword"] = ds_password
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump(payload, f)
+                tmp_path = f.name
+            run(
+                f'curl -sk -X PUT "{base}/{node_id}" '
+                f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: protocol=2.0,resource=1.0" '
+                f'-H "Content-Type: application/json" '
+                f'-d @{tmp_path}',
+                capture=True,
+            )
+            os.unlink(tmp_path)
+            # Verify the PUT took effect before declaring success.
+            r = run(
+                f'curl -sk "{base}/{node_id}" '
+                f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: protocol=2.0,resource=1.0"',
+                capture=True,
+            )
+            saved = json.loads(r.stdout)
+            if not saved.get("primaryServers") or not saved.get("accountSearchBaseDn"):
+                raise SystemExit(
+                    f"LdapDecisionNode {node_id} in {realm} still has empty DS settings after PUT: {saved}"
+                )
+            print(f"  {realm}/{node_id}: DS settings applied ✓")
+
+
+def _step_configure_ldap_decision_nodes():
+    step("11c", "Configure LdapDecisionNode DS settings for imported journeys")
+    kubectl(f"rollout status deployment/am -n {NAMESPACE} --timeout=300s", timeout=310)
+    admin_pw = kube_secret_value("am-env-secrets", "AM_PASSWORDS_AMADMIN_CLEAR")
+    token = _am_token(admin_pw)
+    _configure_ldap_decision_nodes(token)
+
+
 def _step_verify_fbc():
     step(12, "Verify FBC init containers")
     for app in ("am", "idm"):
@@ -942,6 +1026,7 @@ def cmd_deploy(args):
     _step_amster_and_fix_secret()
     _step_create_tenant_stubs()
     _step_create_pkce_client()
+    _step_configure_ldap_decision_nodes()
     _step_verify_fbc()
     _step_health_checks()
     # Step 14 — push IDM and AM config to Gitea and restart both pods.
