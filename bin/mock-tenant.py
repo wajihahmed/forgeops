@@ -804,12 +804,72 @@ def _configure_ldap_decision_nodes(token):
             print(f"  {realm}/{node_id}: DS settings applied ✓")
 
 
-def _step_configure_ldap_decision_nodes():
-    step("11c", "Configure LdapDecisionNode DS settings for imported journeys")
+def _configure_scripting_whitelists(token):
+    """Ensure script engines allow the IDM identity-repository bridge class.
+
+    AIC-imported journeys (e.g. inst) run scripts like inst-find-main-user-legacy
+    that call idRepository.getAttribute(...). idRepository is backed by
+    org.forgerock.openam.scripting.idrepo.ScriptIdentityRepository, which is NOT
+    in AM's default scripting whitelist for either engine context. Without it the
+    script dies with "Classname failed to match whitelist" and the journey fails.
+
+    Two independent engine contexts must be patched: SCRIPTED_DECISION_NODE and
+    AUTHENTICATION_TREE_DECISION_NODE (the latter is what inst-find-main-user-legacy
+    runs in — patching only the former is insufficient).
+
+    These whitelists live in AM's config store, NOT in the seeded
+    engineconfiguration.json files (editing those files has no runtime effect),
+    so this must go through the AM REST API. Idempotent: the class is only
+    appended when missing, and the result is verified with a GET.
+    """
+    identity_repo_class = "org.forgerock.openam.scripting.idrepo.ScriptIdentityRepository"
+    for context in ("SCRIPTED_DECISION_NODE", "AUTHENTICATION_TREE_DECISION_NODE"):
+        url = (
+            f"https://{PLATFORM_FQDN}/am/json/global-config/services/"
+            f"scripting/contexts/{context}/engineConfiguration"
+        )
+        r = run(
+            f'curl -sk "{url}" '
+            f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: protocol=1.0,resource=1.0"',
+            capture=True,
+        )
+        config = json.loads(r.stdout)
+        whitelist = config.get("whiteList", [])
+        if identity_repo_class in whitelist:
+            print(f"  {context}: whitelist already allows {identity_repo_class.rsplit('.', 1)[-1]} ✓")
+            continue
+        whitelist.append(identity_repo_class)
+        config["whiteList"] = whitelist
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config, f)
+            tmp_path = f.name
+        run(
+            f'curl -sk -X PUT "{url}" '
+            f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: protocol=1.0,resource=1.0" '
+            f'-H "Content-Type: application/json" '
+            f'-d @{tmp_path}',
+            capture=True,
+        )
+        os.unlink(tmp_path)
+        r = run(
+            f'curl -sk "{url}" '
+            f'-H "iPlanetDirectoryPro: {token}" -H "Accept-API-Version: protocol=1.0,resource=1.0"',
+            capture=True,
+        )
+        saved = json.loads(r.stdout)
+        if identity_repo_class not in saved.get("whiteList", []):
+            raise SystemExit(
+                f"{context} engine whitelist still missing {identity_repo_class} after PUT: {saved}"
+            )
+        print(f"  {context}: whitelist now allows {identity_repo_class.rsplit('.', 1)[-1]} ✓")
+
+
+def _step_configure_scripting_whitelists():
+    step("11d", "Allow scripted nodes to access the identity repository")
     kubectl(f"rollout status deployment/am -n {NAMESPACE} --timeout=300s", timeout=310)
     admin_pw = kube_secret_value("am-env-secrets", "AM_PASSWORDS_AMADMIN_CLEAR")
     token = _am_token(admin_pw)
-    _configure_ldap_decision_nodes(token)
+    _configure_scripting_whitelists(token)
 
 
 def _step_verify_fbc():
@@ -1027,6 +1087,7 @@ def cmd_deploy(args):
     _step_create_tenant_stubs()
     _step_create_pkce_client()
     _step_configure_ldap_decision_nodes()
+    _step_configure_scripting_whitelists()
     _step_verify_fbc()
     _step_health_checks()
     # Step 14 — push IDM and AM config to Gitea and restart both pods.
